@@ -1,0 +1,27 @@
+name: setup
+
+description: setup
+
+runs:
+  using: composite
+  steps:
+    - name: Setup node
+      uses: actions/setup-node@v4
+      with:
+        node-version: "20.x"
+
+    - name: Setup Bun
+      uses: oven-sh/setup-bun@v2
+      with:
+        bun-version: "1.3.10"
+
+    - name: Install Foundry
+      uses: foundry-rs/foundry-toolchain@v1
+
+    - name: Install packages
+      run: bun install --frozen-lockfile
+      shell: bash
+
+    - name: Compile
+      run: bun run compile
+      shell: bash
