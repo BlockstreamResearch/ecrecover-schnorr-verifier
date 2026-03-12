@@ -151,7 +151,7 @@ describe("SchnorrVerifier", () => {
       ).to.equal(false);
     });
 
-    it("rejects zero-message signatures even when BIP340 verification succeeds off-chain", async () => {
+    it("accepts zero-message signatures, matching BIP340", async () => {
       const secretKey = hexToBytes(OFFICIAL_VECTOR_3.secretKey!);
       const zeroMessageHash = ethers.ZeroHash;
       const zeroMessageSignature = schnorr.sign(
@@ -167,7 +167,7 @@ describe("SchnorrVerifier", () => {
       );
       expect(
         await verifier.verify(hexToBigInt(publicKeyX), 0, signature.signatureScalar, zeroMessageHash, signature.nonceX),
-      ).to.equal(false);
+      ).to.equal(true);
     });
   });
 });

@@ -29,7 +29,6 @@ library SchnorrVerifierLib {
     /// - `publicKeyX` is constrained to `[1, n-1]` because it is passed through the ECDSA `r` slot.
     /// - `publicKeyYParity` must be 0 or 1 and selects `lift_x_parity(publicKeyX)` for the recovered key point.
     /// - `signatureScalar` must be in `[1, n-1]`.
-    /// - `messageHash` must be non-zero in this implementation.
     /// - `nonceX` must be in `[1, p-1]` and lie on secp256k1 (validated via modular square root).
     ///
     /// Workflow:
@@ -64,12 +63,7 @@ library SchnorrVerifierLib {
             return false;
         }
 
-        // This implementation excludes all-zero message input.
-        if (messageHash_ == bytes32(0)) {
-            return false;
-        }
-
-        // Nounce x-coordinate must be a field element and non-zero.
+        // Nonce x-coordinate must be a field element and non-zero.
         if (nonceX_ == 0 || nonceX_ >= SECP256K1_FIELD_PRIME) {
             return false;
         }
