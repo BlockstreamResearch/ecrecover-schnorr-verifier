@@ -74,31 +74,31 @@ library SchnorrVerifierLib {
         }
 
         // Reconstruct `R = lift_x_even(nonceX)` and its Ethereum address.
-        address noncePointAddress;
+        address noncePointAddress_;
         {
-            (bool isNonceXOnCurve, uint256 liftedEvenY) = _liftXToEvenY(nonceX_);
-            if (!isNonceXOnCurve) {
+            (bool isNonceXOnCurve_, uint256 liftedEvenY_) = _liftXToEvenY(nonceX_);
+            if (!isNonceXOnCurve_) {
                 return false;
             }
-            noncePointAddress = _pointAddress(nonceX_, liftedEvenY);
+            noncePointAddress_ = _pointAddress(nonceX_, liftedEvenY_);
         }
 
         // BIP340 challenge and sign-convention conversion:
         // e  = H(Rx || Px || m) mod n
         // e* = n - e (mod n), so [e*]P = -[e]P
-        uint256 negatedChallengeScalar;
+        uint256 negatedChallengeScalar_;
         {
-            (bool challengeComputationSucceeded, uint256 challengeScalar) = _challengeBIP340(
+            (bool challengeComputationSucceeded_, uint256 challengeScalar_) = _challengeBIP340(
                 nonceX_,
                 publicKeyX_,
                 messageHash_
             );
-            if (!challengeComputationSucceeded) {
+            if (!challengeComputationSucceeded_) {
                 return false;
             }
-            negatedChallengeScalar = challengeScalar == 0
+            negatedChallengeScalar_ = challengeScalar_ == 0
                 ? 0
-                : SECP256K1_SCALAR_ORDER - challengeScalar;
+                : SECP256K1_SCALAR_ORDER - challengeScalar_;
         }
 
         // ecrecover argument mapping:
@@ -107,18 +107,18 @@ library SchnorrVerifierLib {
         // r    = Px
         // s    = e* * Px mod n
         // This recovers Q = [e*]P + [s]G.
-        address recoveredAddress = _recoverAddress(
+        address recoveredAddress_ = _recoverAddress(
             bytes32(
                 SECP256K1_SCALAR_ORDER -
                     mulmod(publicKeyX_, signatureScalar_, SECP256K1_SCALAR_ORDER)
             ),
             uint8(27 + uint256(publicKeyYParity_)),
             bytes32(publicKeyX_),
-            bytes32(mulmod(negatedChallengeScalar, publicKeyX_, SECP256K1_SCALAR_ORDER))
+            bytes32(mulmod(negatedChallengeScalar_, publicKeyX_, SECP256K1_SCALAR_ORDER))
         );
 
         // Accept iff recovered point matches lifted nonce point (and recovery succeeded).
-        return recoveredAddress != address(0) && recoveredAddress == noncePointAddress;
+        return recoveredAddress_ != address(0) && recoveredAddress_ == noncePointAddress_;
     }
 
     /// @dev Computes BIP340 challenge scalar:
@@ -126,10 +126,10 @@ library SchnorrVerifierLib {
     /// Uses SHA-256 precompile (`0x02`) directly from assembly to keep calldata layout explicit.
     /// Returns `(false, 0)` if the precompile call does not return a 32-byte output.
     function _challengeBIP340(
-        uint256 nonceX,
-        uint256 publicKeyX,
-        bytes32 messageHash
-    ) internal view returns (bool challengeComputationSucceeded, uint256 challengeScalar) {
+        uint256 nonceX_,
+        uint256 publicKeyX_,
+        bytes32 messageHash_
+    ) internal view returns (bool challengeComputationSucceeded_, uint256 challengeScalar_) {
         assembly ("memory-safe") {
             let freeMemoryPointer := mload(0x40)
             let shaInputPointer := freeMemoryPointer
@@ -139,9 +139,9 @@ library SchnorrVerifierLib {
             // [tagHash][tagHash][nonceX][publicKeyX][messageHash].
             mstore(shaInputPointer, BIP340_CHALLENGE_TAG_HASH)
             mstore(add(shaInputPointer, 0x20), BIP340_CHALLENGE_TAG_HASH)
-            mstore(add(shaInputPointer, 0x40), nonceX)
-            mstore(add(shaInputPointer, 0x60), publicKeyX)
-            mstore(add(shaInputPointer, 0x80), messageHash)
+            mstore(add(shaInputPointer, 0x40), nonceX_)
+            mstore(add(shaInputPointer, 0x60), publicKeyX_)
+            mstore(add(shaInputPointer, 0x80), messageHash_)
 
             // SHA-256 precompile (0x02): input=160 bytes, output=32 bytes.
             let shaCallSucceeded := staticcall(
@@ -152,10 +152,10 @@ library SchnorrVerifierLib {
                 shaOutputPointer,
                 0x20
             )
-            challengeComputationSucceeded := and(shaCallSucceeded, eq(returndatasize(), 0x20))
-            if challengeComputationSucceeded {
+            challengeComputationSucceeded_ := and(shaCallSucceeded, eq(returndatasize(), 0x20))
+            if challengeComputationSucceeded_ {
                 // Reduce digest into scalar field Zn.
-                challengeScalar := mod(mload(shaOutputPointer), SECP256K1_SCALAR_ORDER)
+                challengeScalar_ := mod(mload(shaOutputPointer), SECP256K1_SCALAR_ORDER)
             }
 
             mstore(0x40, freeMemoryPointer)
@@ -168,36 +168,40 @@ library SchnorrVerifierLib {
     /// This exponent is precomputed as `SECP256K1_SQRT_EXPONENT`.
     /// Returns `(false, 0)` when `pointX` is not a quadratic residue on the curve.
     function _liftXToEvenY(
-        uint256 pointX
+        uint256 pointX_
     ) internal view returns (bool pointIsValid, uint256 liftedEvenY) {
         // c = x^3 + 7 mod p.
-        uint256 curveEquationValue = addmod(
-            mulmod(mulmod(pointX, pointX, SECP256K1_FIELD_PRIME), pointX, SECP256K1_FIELD_PRIME),
+        uint256 curveEquationValue_ = addmod(
+            mulmod(
+                mulmod(pointX_, pointX_, SECP256K1_FIELD_PRIME),
+                pointX_,
+                SECP256K1_FIELD_PRIME
+            ),
             7,
             SECP256K1_FIELD_PRIME
         );
 
         // For p % 4 == 3 curves, sqrt(c) = c^((p+1)/4) mod p.
-        (bool modExpSucceeded, uint256 candidateY) = _modExp(
-            curveEquationValue,
+        (bool modExpSucceeded_, uint256 candidateY_) = _modExp(
+            curveEquationValue_,
             SECP256K1_SQRT_EXPONENT,
             SECP256K1_FIELD_PRIME
         );
-        if (!modExpSucceeded) {
+        if (!modExpSucceeded_) {
             return (false, 0);
         }
 
         // Reject non-residue x values.
-        if (mulmod(candidateY, candidateY, SECP256K1_FIELD_PRIME) != curveEquationValue) {
+        if (mulmod(candidateY_, candidateY_, SECP256K1_FIELD_PRIME) != curveEquationValue_) {
             return (false, 0);
         }
 
         // Canonicalize to even-y branch.
-        if ((candidateY & 1) == 1) {
-            candidateY = SECP256K1_FIELD_PRIME - candidateY;
+        if ((candidateY_ & 1) == 1) {
+            candidateY_ = SECP256K1_FIELD_PRIME - candidateY_;
         }
 
-        return (true, candidateY);
+        return (true, candidateY_);
     }
 
     /// @dev Computes Ethereum address for affine point `(x, y)`:

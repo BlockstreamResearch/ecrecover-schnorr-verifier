@@ -7,20 +7,20 @@ contract SchnorrVerifier {
     /// @notice External wrapper around the library verifier.
     /// @dev Keeps ABI simple while all cryptographic logic lives in `SchnorrVerifierLib`.
     function verify(
-        uint256 publicKeyX,
-        uint8 publicKeyYParity,
-        uint256 signatureScalar,
-        bytes32 messageHash,
-        uint256 nonceX
+        uint256 publicKeyX_,
+        uint8 publicKeyYParity_,
+        uint256 signatureScalar_,
+        bytes32 messageHash_,
+        uint256 nonceX_
     ) external view returns (bool isVerified_) {
         // Delegate verification to assembly-heavy library implementation.
         return
             SchnorrVerifierLib.verify(
-                publicKeyX,
-                publicKeyYParity,
-                signatureScalar,
-                messageHash,
-                nonceX
+                publicKeyX_,
+                publicKeyYParity_,
+                signatureScalar_,
+                messageHash_,
+                nonceX_
             );
     }
 }
