@@ -36,7 +36,7 @@ const OFFICIAL_VECTOR_3: Bip340Vector = {
     "7EB0509757E246F19449885651611CB965ECC1A187DD51B64FDA1EDC9637D5EC97582B9CB13DB3933705B32BA982AF5AF25FD78881EBB32771FC5922EFC66EA3",
 };
 
-const SECP256K1_HALF_SCALAR_ORDER = 0x7fffffffffffffffffffffffffffffff5d576e7357a4501ddfe92f46681b20a0n;
+const SECP256K1_SCALAR_ORDER = 0xfffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364141n;
 
 const { ethers, networkHelpers } = await hre.network.connect();
 
@@ -103,7 +103,7 @@ describe("SchnorrVerifier", () => {
     it("accepts official BIP340 test vector #3", async () => {
       const vector = toVerifierInput(OFFICIAL_VECTOR_3);
 
-      expect(vector.publicKeyX <= SECP256K1_HALF_SCALAR_ORDER).to.equal(true);
+      expect(vector.publicKeyX < SECP256K1_SCALAR_ORDER).to.equal(true);
       expect(await verifier.verify(...(Object.values(vector) as any))).to.equal(true);
     });
 
@@ -128,10 +128,11 @@ describe("SchnorrVerifier", () => {
       expect(await verifier.verify(...(Object.values(vector) as any))).to.equal(false);
     });
 
-    it("rejects valid BIP340 signatures outside the adapted low-x domain", async () => {
+    it("accepts valid BIP340 signatures with publicKeyX in the upper half of [1, n-1]", async () => {
       const vector = toVerifierInput(OFFICIAL_VECTOR_1);
 
-      expect(vector.publicKeyX > SECP256K1_HALF_SCALAR_ORDER).to.equal(true);
+      expect(vector.publicKeyX > SECP256K1_SCALAR_ORDER / 2n).to.equal(true);
+      expect(vector.publicKeyX < SECP256K1_SCALAR_ORDER).to.equal(true);
       expect(
         schnorr.verify(
           hexToBytes(OFFICIAL_VECTOR_1.signature),
@@ -139,7 +140,15 @@ describe("SchnorrVerifier", () => {
           hexToBytes(OFFICIAL_VECTOR_1.publicKeyX),
         ),
       ).to.equal(true);
-      expect(await verifier.verify(...(Object.values(vector) as any))).to.equal(false);
+      expect(await verifier.verify(...(Object.values(vector) as any))).to.equal(true);
+    });
+
+    it("rejects publicKeyX values that do not fit the ECDSA r slot", async () => {
+      const vector = toVerifierInput(OFFICIAL_VECTOR_3);
+
+      expect(
+        await verifier.verify(SECP256K1_SCALAR_ORDER, 0, vector.signatureScalar, vector.messageHash, vector.nonceX),
+      ).to.equal(false);
     });
 
     it("rejects zero-message signatures even when BIP340 verification succeeds off-chain", async () => {

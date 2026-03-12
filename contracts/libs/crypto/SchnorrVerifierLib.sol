@@ -19,9 +19,6 @@ library SchnorrVerifierLib {
         0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEFFFFFC2F;
     uint256 internal constant SECP256K1_SCALAR_ORDER =
         0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141;
-    uint256 internal constant SECP256K1_HALF_SCALAR_ORDER =
-        0x7FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF5D576E7357A4501DDFE92F46681B20A0;
-
     uint256 private constant SECP256K1_SQRT_EXPONENT =
         0x3FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFBFFFFF0C;
     bytes32 private constant BIP340_CHALLENGE_TAG_HASH =
@@ -29,7 +26,7 @@ library SchnorrVerifierLib {
 
     /// @notice Verifies a Schnorr signature represented as `(nonceX, signatureScalar)` against an x-only key.
     /// @dev Inputs and checks:
-    /// - `publicKeyX` is constrained to `(0, n/2]` due to `ecrecover` slot constraints used by the trick.
+    /// - `publicKeyX` is constrained to `[1, n-1]` because it is passed through the ECDSA `r` slot.
     /// - `publicKeyYParity` must be 0 or 1 and selects `lift_x_parity(publicKeyX)` for the recovered key point.
     /// - `signatureScalar` must be in `[1, n-1]`.
     /// - `messageHash` must be non-zero in this implementation.
@@ -56,9 +53,9 @@ library SchnorrVerifierLib {
         bytes32 messageHash_,
         uint256 nonceX_
     ) internal view returns (bool isVerified_) {
-        // Public key x is routed through `ecrecover` slots, so this verifier
-        // enforces the adapted low-range domain used by the construction.
-        if (publicKeyX_ == 0 || publicKeyX_ > SECP256K1_HALF_SCALAR_ORDER) {
+        // Public key x is routed through the ECDSA `r` slot, which accepts
+        // only scalars in `[1, n-1]`.
+        if (publicKeyX_ == 0 || publicKeyX_ >= SECP256K1_SCALAR_ORDER) {
             return false;
         }
 
