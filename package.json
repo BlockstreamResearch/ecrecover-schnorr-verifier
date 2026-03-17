@@ -19,6 +19,8 @@
     "prepare": "husky",
     "compile": "hardhat compile",
     "coverage": "hardhat test --coverage",
+    "forge:deps": "sh ./scripts/foundry-install-deps.sh",
+    "forge:test": "bun run forge:deps && cargo build --release --manifest-path tools/schnorr-ffi/Cargo.toml && forge test",
     "test": "hardhat test",
     "private-network": "hardhat node",
     "lint": "prettier --check \"./**/*.json\" && prettier --check \"./**/*.ts\" && sh -c 'if find contracts -name \"*.sol\" -print -quit | grep -q .; then prettier --check \"contracts/**/*.sol\" && slippy \"./contracts/**/*.sol\"; else echo \"No Solidity files found\"; fi' && eslint . --ext .ts",

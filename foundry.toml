@@ -1,0 +1,15 @@
+[profile.default]
+src = "contracts"
+test = "foundry-test"
+libs = ["lib"]
+remappings = ["forge-std/=lib/forge-std/src/"]
+out = "foundry-out"
+cache_path = "foundry-cache"
+solc_version = "0.8.34"
+evm_version = "paris"
+ffi = true
+optimizer = true
+optimizer_runs = 200
+
+[profile.default.fuzz]
+runs = 10000

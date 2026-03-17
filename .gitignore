@@ -8,9 +8,15 @@ artifacts
 coverage.json
 coverage
 generated-markups
+foundry-cache
+foundry-out
+lib
 
 # IDE files
 .idea
 
 # Typechain generated files
 generated-types
+
+# Rust helper build artifacts
+tools/schnorr-ffi/target
