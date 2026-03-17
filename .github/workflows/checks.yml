@@ -24,3 +24,9 @@ jobs:
 
       - name: Run hardhat tests
         run: bun run test
+
+      - name: Run Rust helper tests
+        run: cargo test --manifest-path tools/schnorr-ffi/Cargo.toml
+
+      - name: Run Foundry fuzz tests
+        run: bun run forge:test
