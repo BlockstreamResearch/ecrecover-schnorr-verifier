@@ -11,3 +11,11 @@ coverage
 
 # Typechain generated files
 generated-types
+
+# Rust build artifacts
+tools/schnorr-ffi/target
+
+# Foundry files
+foundry-cache
+foundry-out
+lib

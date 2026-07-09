@@ -112,28 +112,26 @@ library SchnorrVerifierLib {
                 SECP256K1_SCALAR_ORDER -
                     mulmod(publicKeyX_, signatureScalar_, SECP256K1_SCALAR_ORDER)
             ),
-            uint8(27 + uint256(publicKeyYParity_)),
+            27 + uint256(publicKeyYParity_),
             bytes32(publicKeyX_),
             bytes32(mulmod(negatedChallengeScalar_, publicKeyX_, SECP256K1_SCALAR_ORDER))
         );
 
-        // Accept iff recovered point matches lifted nonce point (and recovery succeeded).
+        // Accept only if recovered point matches lifted nonce point (and recovery succeeded).
         return recoveredAddress_ != address(0) && recoveredAddress_ == noncePointAddress_;
     }
 
     /// @dev Computes BIP340 challenge scalar:
     /// `challenge = SHA256(tagHash || tagHash || nonceX || publicKeyX || messageHash) mod n`.
-    /// Uses SHA-256 precompile (`0x02`) directly from assembly to keep calldata layout explicit.
+    /// Uses SHA-256 precompile (`0x02`) directly from assembly to keep the input layout explicit.
     /// Returns `(false, 0)` if the precompile call does not return a 32-byte output.
     function _challengeBIP340(
         uint256 nonceX_,
         uint256 publicKeyX_,
         bytes32 messageHash_
-    ) internal view returns (bool challengeComputationSucceeded_, uint256 challengeScalar_) {
+    ) private view returns (bool challengeComputationSucceeded_, uint256 challengeScalar_) {
         assembly ("memory-safe") {
-            let freeMemoryPointer := mload(0x40)
-            let shaInputPointer := freeMemoryPointer
-            let shaOutputPointer := add(shaInputPointer, 0xa0)
+            let shaInputPointer := mload(0x40)
 
             // Build 160-byte preimage:
             // [tagHash][tagHash][nonceX][publicKeyX][messageHash].
@@ -143,22 +141,13 @@ library SchnorrVerifierLib {
             mstore(add(shaInputPointer, 0x60), publicKeyX_)
             mstore(add(shaInputPointer, 0x80), messageHash_)
 
-            // SHA-256 precompile (0x02): input=160 bytes, output=32 bytes.
-            let shaCallSucceeded := staticcall(
-                gas(),
-                0x02,
-                shaInputPointer,
-                0xa0,
-                shaOutputPointer,
-                0x20
-            )
+            // SHA-256 precompile (0x02): input=160 bytes, 32-byte digest lands in scratch space.
+            let shaCallSucceeded := staticcall(gas(), 0x02, shaInputPointer, 0xa0, 0x00, 0x20)
             challengeComputationSucceeded_ := and(shaCallSucceeded, eq(returndatasize(), 0x20))
             if challengeComputationSucceeded_ {
                 // Reduce digest into scalar field Zn.
-                challengeScalar_ := mod(mload(shaOutputPointer), SECP256K1_SCALAR_ORDER)
+                challengeScalar_ := mod(mload(0x00), SECP256K1_SCALAR_ORDER)
             }
-
-            mstore(0x40, freeMemoryPointer)
         }
     }
 
@@ -169,7 +158,7 @@ library SchnorrVerifierLib {
     /// Returns `(false, 0)` when `pointX` is not a quadratic residue on the curve.
     function _liftXToEvenY(
         uint256 pointX_
-    ) internal view returns (bool pointIsValid, uint256 liftedEvenY) {
+    ) private view returns (bool pointIsValid, uint256 liftedEvenY) {
         // c = x^3 + 7 mod p.
         uint256 curveEquationValue_ = addmod(
             mulmod(
@@ -209,18 +198,13 @@ library SchnorrVerifierLib {
     function _pointAddress(
         uint256 pointX_,
         uint256 pointY_
-    ) internal pure returns (address pointAddress_) {
+    ) private pure returns (address pointAddress_) {
         assembly ("memory-safe") {
-            let freeMemoryPointer := mload(0x40)
-            // Hash 64-byte affine coordinate payload.
-            mstore(freeMemoryPointer, pointX_)
-            mstore(add(freeMemoryPointer, 0x20), pointY_)
+            // Hash 64-byte affine coordinate payload from scratch space.
+            mstore(0x00, pointX_)
+            mstore(0x20, pointY_)
             // Truncate to Ethereum address width (160 bits).
-            pointAddress_ := and(
-                keccak256(freeMemoryPointer, 0x40),
-                0xffffffffffffffffffffffffffffffffffffffff
-            )
-            mstore(0x40, freeMemoryPointer)
+            pointAddress_ := and(keccak256(0x00, 0x40), 0xffffffffffffffffffffffffffffffffffffffff)
         }
     }
 
@@ -234,9 +218,7 @@ library SchnorrVerifierLib {
         uint256 modulusValue_
     ) private view returns (bool callSucceeded_, uint256 exponentiationResult_) {
         assembly ("memory-safe") {
-            let freeMemoryPointer := mload(0x40)
-            let modExpInputPointer := freeMemoryPointer
-            let modExpOutputPointer := add(modExpInputPointer, 0xc0)
+            let modExpInputPointer := mload(0x40)
 
             // Modexp precompile ABI:
             // [baseLen][expLen][modLen][base][exp][mod].
@@ -247,61 +229,52 @@ library SchnorrVerifierLib {
             mstore(add(modExpInputPointer, 0x80), exponentValue_)
             mstore(add(modExpInputPointer, 0xa0), modulusValue_)
 
-            // Compute base^exp mod modulus via precompile 0x05.
+            // Compute base^exp mod modulus via precompile 0x05, result lands in scratch space.
             let modExpCallSucceeded := staticcall(
                 gas(),
                 0x05,
                 modExpInputPointer,
                 0xc0,
-                modExpOutputPointer,
+                0x00,
                 0x20
             )
             callSucceeded_ := and(modExpCallSucceeded, eq(returndatasize(), 0x20))
             if callSucceeded_ {
-                exponentiationResult_ := mload(modExpOutputPointer)
+                exponentiationResult_ := mload(0x00)
             }
-
-            mstore(0x40, freeMemoryPointer)
         }
     }
 
-    /// @dev Thin `ecrecover` wrapper over precompile `0x01` with explicit calldata layout:
+    /// @dev Thin `ecrecover` wrapper over precompile `0x01` with explicit input layout:
     /// `[hash][v][r][s]` (each 32 bytes, with `v` in low byte).
     /// Returns `address(0)` on precompile failure.
     function _recoverAddress(
         bytes32 messageForRecover_,
-        uint8 recoveryId_,
+        uint256 recoveryId_,
         bytes32 signatureR_,
         bytes32 signatureS_
-    ) private view returns (address recoveredAddress) {
+    ) private view returns (address recoveredAddress_) {
         assembly ("memory-safe") {
-            let freeMemoryPointer := mload(0x40)
-            let ecrecoverInputPointer := freeMemoryPointer
-            let ecrecoverOutputPointer := add(ecrecoverInputPointer, 0x80)
+            let ecrecoverInputPointer := mload(0x40)
 
-            // ECDSA recovery calldata words: [hash][v][r][s].
+            // ECDSA recovery input words: [hash][v][r][s].
             mstore(ecrecoverInputPointer, messageForRecover_)
-            mstore(add(ecrecoverInputPointer, 0x20), and(recoveryId_, 0xff))
+            mstore(add(ecrecoverInputPointer, 0x20), recoveryId_)
             mstore(add(ecrecoverInputPointer, 0x40), signatureR_)
             mstore(add(ecrecoverInputPointer, 0x60), signatureS_)
 
-            // On success, returned word contains the recovered address.
+            // On success, the recovered address lands in scratch space.
             let recoverCallSucceeded := staticcall(
                 gas(),
                 0x01,
                 ecrecoverInputPointer,
                 0x80,
-                ecrecoverOutputPointer,
+                0x00,
                 0x20
             )
             if and(recoverCallSucceeded, eq(returndatasize(), 0x20)) {
-                recoveredAddress := and(
-                    mload(ecrecoverOutputPointer),
-                    0xffffffffffffffffffffffffffffffffffffffff
-                )
+                recoveredAddress_ := and(mload(0x00), 0xffffffffffffffffffffffffffffffffffffffff)
             }
-
-            mstore(0x40, freeMemoryPointer)
         }
     }
 }
