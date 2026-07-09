@@ -63,14 +63,167 @@ contract SchnorrVerifierFoundryTest is Test {
         uint256 secretKeyScalar_,
         bytes32 auxRand_
     ) public {
-        uint256 boundedSecretKeyScalar_ = bound(secretKeyScalar_, 1, SECP256K1_SCALAR_ORDER - 1);
-        VerifierInput memory input_ = _sign(messageHash_, boundedSecretKeyScalar_, auxRand_);
-
-        vm.assume(input_.publicKeyX < SECP256K1_SCALAR_ORDER);
+        VerifierInput memory input_ = _signBounded(messageHash_, secretKeyScalar_, auxRand_);
 
         assertEq(input_.publicKeyYParity, 0);
         assertEq(input_.messageHash, messageHash_);
         assertTrue(_verify(input_));
+    }
+
+    function testFuzzRejectsTamperedMessageHash(
+        bytes32 messageHash_,
+        uint256 secretKeyScalar_,
+        bytes32 auxRand_,
+        bytes32 tamperedMessageHash_
+    ) public {
+        VerifierInput memory input_ = _signBounded(messageHash_, secretKeyScalar_, auxRand_);
+        vm.assume(tamperedMessageHash_ != input_.messageHash);
+
+        input_.messageHash = tamperedMessageHash_;
+
+        assertFalse(_verify(input_));
+    }
+
+    function testFuzzRejectsTamperedSignatureScalar(
+        bytes32 messageHash_,
+        uint256 secretKeyScalar_,
+        bytes32 auxRand_,
+        uint256 scalarDelta_
+    ) public {
+        VerifierInput memory input_ = _signBounded(messageHash_, secretKeyScalar_, auxRand_);
+        uint256 boundedScalarDelta_ = bound(scalarDelta_, 1, SECP256K1_SCALAR_ORDER - 1);
+
+        // Any additive shift of `s` within Zn yields a different scalar and must be rejected.
+        input_.signatureScalar = addmod(
+            input_.signatureScalar,
+            boundedScalarDelta_,
+            SECP256K1_SCALAR_ORDER
+        );
+
+        assertFalse(_verify(input_));
+    }
+
+    function testFuzzRejectsTamperedNonceX(
+        bytes32 messageHash_,
+        uint256 secretKeyScalar_,
+        bytes32 auxRand_,
+        uint256 tamperedNonceX_
+    ) public {
+        VerifierInput memory input_ = _signBounded(messageHash_, secretKeyScalar_, auxRand_);
+        uint256 boundedTamperedNonceX_ = bound(tamperedNonceX_, 1, SECP256K1_FIELD_PRIME - 1);
+        vm.assume(boundedTamperedNonceX_ != input_.nonceX);
+
+        // Covers both off-curve x values (rejected by lifting) and on-curve
+        // values (rejected by the final address comparison).
+        input_.nonceX = boundedTamperedNonceX_;
+
+        assertFalse(_verify(input_));
+    }
+
+    function testFuzzRejectsTamperedPublicKeyX(
+        bytes32 messageHash_,
+        uint256 secretKeyScalar_,
+        bytes32 auxRand_,
+        uint256 tamperedPublicKeyX_
+    ) public {
+        VerifierInput memory input_ = _signBounded(messageHash_, secretKeyScalar_, auxRand_);
+        uint256 boundedTamperedPublicKeyX_ = bound(
+            tamperedPublicKeyX_,
+            1,
+            SECP256K1_SCALAR_ORDER - 1
+        );
+        vm.assume(boundedTamperedPublicKeyX_ != input_.publicKeyX);
+
+        // A signature must not verify against any key other than the signer's.
+        input_.publicKeyX = boundedTamperedPublicKeyX_;
+
+        assertFalse(_verify(input_));
+    }
+
+    function testFuzzRejectsFlippedParity(
+        bytes32 messageHash_,
+        uint256 secretKeyScalar_,
+        bytes32 auxRand_
+    ) public {
+        VerifierInput memory input_ = _signBounded(messageHash_, secretKeyScalar_, auxRand_);
+
+        // BIP340 keys are even-y; verifying against the odd-y branch targets -P
+        // and must fail.
+        input_.publicKeyYParity = 1;
+
+        assertFalse(_verify(input_));
+    }
+
+    function testFuzzRejectsOutOfRangeInputs(
+        bytes32 messageHash_,
+        uint256 secretKeyScalar_,
+        bytes32 auxRand_,
+        uint8 parity_
+    ) public {
+        VerifierInput memory valid_ = _signBounded(messageHash_, secretKeyScalar_, auxRand_);
+
+        // Each mutation pushes exactly one otherwise-valid input out of its
+        // documented domain; all must be rejected without reverting.
+        VerifierInput memory input_ = valid_;
+        input_.publicKeyX = 0;
+        assertFalse(_verify(input_));
+        input_.publicKeyX = SECP256K1_SCALAR_ORDER;
+        assertFalse(_verify(input_));
+        input_.publicKeyX = type(uint256).max;
+        assertFalse(_verify(input_));
+
+        input_ = valid_;
+        input_.signatureScalar = 0;
+        assertFalse(_verify(input_));
+        input_.signatureScalar = SECP256K1_SCALAR_ORDER;
+        assertFalse(_verify(input_));
+        input_.signatureScalar = type(uint256).max;
+        assertFalse(_verify(input_));
+
+        input_ = valid_;
+        input_.nonceX = 0;
+        assertFalse(_verify(input_));
+        input_.nonceX = SECP256K1_FIELD_PRIME;
+        assertFalse(_verify(input_));
+        input_.nonceX = type(uint256).max;
+        assertFalse(_verify(input_));
+
+        input_ = valid_;
+        input_.publicKeyYParity = uint8(bound(parity_, 2, type(uint8).max));
+        assertFalse(_verify(input_));
+    }
+
+    function testFuzzRejectsArbitraryInputWithoutReverting(
+        uint256 publicKeyX_,
+        uint8 publicKeyYParity_,
+        uint256 signatureScalar_,
+        bytes32 messageHash_,
+        uint256 nonceX_
+    ) public view {
+        // Unstructured input must never verify (a hit here would be a forgery)
+        // and must never revert.
+        assertFalse(
+            verifier.verify(
+                publicKeyX_,
+                publicKeyYParity_,
+                signatureScalar_,
+                messageHash_,
+                nonceX_
+            )
+        );
+    }
+
+    /// @dev Signs with a secret key bounded into `[1, n-1]` and skips runs whose
+    /// public key x does not fit the ECDSA `r` slot, mirroring the accept-path fuzz test.
+    function _signBounded(
+        bytes32 messageHash_,
+        uint256 secretKeyScalar_,
+        bytes32 auxRand_
+    ) internal returns (VerifierInput memory input_) {
+        uint256 boundedSecretKeyScalar_ = bound(secretKeyScalar_, 1, SECP256K1_SCALAR_ORDER - 1);
+        input_ = _sign(messageHash_, boundedSecretKeyScalar_, auxRand_);
+
+        vm.assume(input_.publicKeyX < SECP256K1_SCALAR_ORDER);
     }
 
     function _sign(
