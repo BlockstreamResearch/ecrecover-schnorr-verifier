@@ -113,12 +113,13 @@ jobs:
         if: steps.changes.outputs.changed == 'true' && steps.certora-key.outputs.present == 'true'
         run: |
           set -o pipefail
-          certoraRun certora/confs/SchnorrVerifier.conf --wait_for_results all 2>&1 | tee certora-run.log
+          certoraRun certora/confs/SchnorrVerifier.conf --wait_for_results all 2>&1 | tee -a certora-run.log
+          certoraRun certora/confs/SchnorrVerifier-modular.conf --wait_for_results all 2>&1 | tee -a certora-run.log
 
       - name: Publish report link
         if: always() && steps.changes.outputs.changed == 'true' && steps.certora-key.outputs.present == 'true'
         run: |
-          grep -oE 'https://prover\.certora\.com/output/[^[:space:]]+' certora-run.log | tail -1 > report-url.txt || true
+          grep -oE 'https://prover\.certora\.com/output/[^[:space:]]+' certora-run.log | sort -u > report-url.txt || true
           if [ -s report-url.txt ]; then
             {
               echo "### Certora report"

@@ -77,9 +77,7 @@ contract SchnorrVerifierHarness {
             if (!isNonceXOnCurve_) {
                 return false;
             }
-            noncePointAddress_ = address(
-                uint160(uint256(keccak256(abi.encode(nonceX_, liftedEvenY_))))
-            );
+            noncePointAddress_ = _pointAddressReference(nonceX_, liftedEvenY_);
         }
 
         uint256 negatedChallengeScalar_;
@@ -97,17 +95,39 @@ contract SchnorrVerifierHarness {
                 : SECP256K1_SCALAR_ORDER - challengeScalar_;
         }
 
-        address recoveredAddress_ = ecrecover(
+        address recoveredAddress_ = _recoverReference(
             bytes32(
                 SECP256K1_SCALAR_ORDER -
                     mulmod(publicKeyX_, signatureScalar_, SECP256K1_SCALAR_ORDER)
             ),
-            uint8(27 + uint256(publicKeyYParity_)),
+            27 + uint256(publicKeyYParity_),
             bytes32(publicKeyX_),
             bytes32(mulmod(negatedChallengeScalar_, publicKeyX_, SECP256K1_SCALAR_ORDER))
         );
 
         return recoveredAddress_ != address(0) && recoveredAddress_ == noncePointAddress_;
+    }
+
+    /// @dev Reference point address: `last_20_bytes(keccak256(x || y))`. Wrapped as an
+    /// internal function so the modular spec can pair it with `SchnorrVerifierLib._pointAddress`
+    /// under a shared deterministic summary.
+    function _pointAddressReference(
+        uint256 pointX_,
+        uint256 pointY_
+    ) internal pure returns (address pointAddress_) {
+        return address(uint160(uint256(keccak256(abi.encode(pointX_, pointY_)))));
+    }
+
+    /// @dev Reference ECDSA recovery through the `ecrecover` builtin. Wrapped as an internal
+    /// function so the modular spec can pair it with `SchnorrVerifierLib._recoverAddress`
+    /// under a shared deterministic summary.
+    function _recoverReference(
+        bytes32 messageForRecover_,
+        uint256 recoveryId_,
+        bytes32 signatureR_,
+        bytes32 signatureS_
+    ) internal view returns (address recoveredAddress_) {
+        return ecrecover(messageForRecover_, uint8(recoveryId_), signatureR_, signatureS_);
     }
 
     /// @dev Reference BIP340 challenge: `SHA256(tag || tag || Rx || Px || m) mod n` through a

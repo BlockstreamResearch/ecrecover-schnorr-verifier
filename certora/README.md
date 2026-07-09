@@ -7,37 +7,63 @@ This directory contains the Certora Prover setup for `SchnorrVerifierLib`.
 - `harness/SchnorrVerifierHarness.sol` — verification-only contract exposing the optimized
   library verifier (`verifyOptimized`) next to an assembly-free reference implementation
   (`verifyReference`) of the same ecSchnorr\* construction.
-- `specs/SchnorrVerifier.spec` — CVL rules.
-- `confs/SchnorrVerifier.conf` — CI profile: the machine-provable rules.
-- `confs/SchnorrVerifier-full.conf` — all rules, including the solver-limited ones.
+- `specs/SchnorrVerifier.spec` — monolithic CVL rules (no summaries).
+- `specs/SchnorrVerifierModular.spec` — the no-revert, determinism and equivalence rules
+  under paired deterministic summaries of the crypto helpers (see below).
+- `confs/SchnorrVerifier.conf` — CI profile of the monolithic spec: the domain rules.
+- `confs/SchnorrVerifier-modular.conf` — CI profile of the modular spec.
+- `confs/SchnorrVerifier-full.conf` — the monolithic spec including the three rules that
+  are infeasible without summaries; retained as documentation of that limit.
 
 ## Properties and status
 
 Status as of certora-cli 8.16.2 (prover reports:
-[full run](https://prover.certora.com/output/8297013/870afaa6a4a144ab86af8f98f5743b10?anonymousKey=56067313ef772c0e57ceeb468419d25e462c4941),
-[heavy-rules retry](https://prover.certora.com/output/8297013/351400f5bfd14a17b22ed4241885f69f?anonymousKey=bcd380153ca56dbf3a88bb92421820873e336199)):
+[domain rules](https://prover.certora.com/output/8297013/b974fcabecfd40fcb929f601b168aa5c),
+[modular rules](https://prover.certora.com/output/8297013/4fa19ad4e74b4d1f8f6e486d8bf5643b),
+[monolithic attempt](https://prover.certora.com/output/8297013/351400f5bfd14a17b22ed4241885f69f?anonymousKey=bcd380153ca56dbf3a88bb92421820873e336199)):
 
-| Rule                                       | Property                                                                      | Status    |
-| ------------------------------------------ | ----------------------------------------------------------------------------- | --------- |
-| `rejectsPublicKeyXOutsideScalarField`      | `publicKeyX ∉ [1, n-1]` ⇒ `false`                                             | ✅ proved |
-| `rejectsSignatureScalarOutsideScalarField` | `signatureScalar ∉ [1, n-1]` ⇒ `false`                                        | ✅ proved |
-| `rejectsNonceXOutsideBaseField`            | `nonceX ∉ [1, p-1]` ⇒ `false`                                                 | ✅ proved |
-| `rejectsInvalidParity`                     | `publicKeyYParity > 1` ⇒ `false`                                              | ✅ proved |
-| `acceptImpliesWellFormedInput`             | acceptance implies every input is inside its documented domain                | ✅ proved |
-| `verifyNeverReverts`                       | `verify` never reverts on any input; the boolean is the only failure channel  | ⏱ timeout |
-| `verifyIsDeterministic`                    | identical inputs yield identical results                                      | ⏱ timeout |
-| `matchesReferenceImplementation`           | the optimized assembly agrees with the reference implementation on all inputs | ⏱ timeout |
+| Rule                                       | Property                                                                     | Status              |
+| ------------------------------------------ | ---------------------------------------------------------------------------- | ------------------- |
+| `rejectsPublicKeyXOutsideScalarField`      | `publicKeyX ∉ [1, n-1]` ⇒ `false`                                            | ✅ proved           |
+| `rejectsSignatureScalarOutsideScalarField` | `signatureScalar ∉ [1, n-1]` ⇒ `false`                                       | ✅ proved           |
+| `rejectsNonceXOutsideBaseField`            | `nonceX ∉ [1, p-1]` ⇒ `false`                                                | ✅ proved           |
+| `rejectsInvalidParity`                     | `publicKeyYParity > 1` ⇒ `false`                                             | ✅ proved           |
+| `acceptImpliesWellFormedInput`             | acceptance implies every input is inside its documented domain               | ✅ proved           |
+| `verifyNeverReverts`                       | `verify` never reverts on any input; the boolean is the only failure channel | ✅ proved (modular) |
+| `verifyIsDeterministic`                    | identical inputs yield identical results                                     | ✅ proved (modular) |
+| `matchesReferenceImplementation`           | optimized assembly and reference implementation agree on all inputs          | ✅ proved (modular) |
 
-The three timeout rules require the SMT solver to reason through byte-level memory
-encodings combined with chains of nonlinear 256-bit modular arithmetic (`mulmod` over the
-secp256k1 primes), which exceeds current solver capabilities even with a 1-hour per-query
-budget (`SchnorrVerifier-full.conf`). They are excluded from the CI profile and remain
-covered empirically by the differential fuzz suite
-(`foundry-test/SchnorrVerifierReference.t.sol`, 10k runs of optimized-vs-reference on
-arbitrary inputs plus honest-signature acceptance). Rule-level vacuity checks
-(`rule_sanity`) are disabled for the same reason — synthesizing a non-vacuity witness
-walks the same nonlinear paths; non-vacuity of the domain rules is evidenced by the fuzz
-suite exercising every rejection branch.
+## The modular decomposition
+
+The last three rules are **unprovable in their monolithic form** — and not merely because
+of solver capacity. The Prover models unresolved `STATICCALL`s with `NONDET` summaries,
+so the raw assembly calls to the SHA-256 (`0x02`) and modexp (`0x05`) precompiles return
+a fresh nondeterministic value on every invocation. Under that model two identical hash
+invocations may differ, which directly falsifies determinism and reference equivalence;
+the surrounding chains of nonlinear 256-bit `mulmod` additionally push the SMT queries
+past a 1-hour per-query budget (`SchnorrVerifier-full.conf`, kept for reproducing this).
+
+`SchnorrVerifierModular.spec` restores provability by summarizing each library helper
+together with its reference counterpart using the _same_ deterministic ghost-backed CVL
+function, removing the precompile calls from the verified cone. What is then **proved**
+(in seconds) is the entire orchestration of `verify`: input validation, short-circuit
+ordering, challenge negation, argument wiring into the recovery call, and the final
+address comparison — for _every possible behavior_ of the crypto primitives.
+
+What is **assumed** by the pairing (each axiom covered by the differential fuzz suite in
+`foundry-test/SchnorrVerifierReference.t.sol`, 10k runs):
+
+1. `_liftXToEvenY` ≡ `_liftXToEvenYReference`, `_challengeBIP340` ≡ `_challengeReference`,
+   `_pointAddress` ≡ `_pointAddressReference`, `_recoverAddress` ≡ `_recoverReference` —
+   i.e. the leaf crypto helpers compute the same functions.
+2. Challenge scalars are reduced mod n (true by construction on both sides; without this
+   the unconstrained ghost admits `n - challengeScalar` underflowing — a model artifact).
+3. Helper bodies never revert (they contain no revert paths; assembly staticcalls signal
+   failure through their boolean result).
+
+Rule-level vacuity checks (`rule_sanity`) are disabled: synthesizing a non-vacuity
+witness walks the nonlinear paths described above; non-vacuity is evidenced by the fuzz
+suite exercising every branch.
 
 ## Scope
 
@@ -51,17 +77,12 @@ construction itself, which is established by the accompanying paper.
 
 ```sh
 export CERTORAKEY=<your key>
-bun run certora                                            # CI profile (provable rules)
-certoraRun certora/confs/SchnorrVerifier-full.conf         # all rules, expect timeouts
+bun run certora                                             # domain rules (monolithic spec)
+certoraRun certora/confs/SchnorrVerifier-modular.conf       # no-revert, determinism, equivalence
+certoraRun certora/confs/SchnorrVerifier-full.conf          # monolithic heavy rules, expect timeouts
 ```
 
-To attack a single solver-limited rule (as Certora support suggests for unfinished rules):
-
-```sh
-certoraRun certora/confs/SchnorrVerifier-full.conf --rule matchesReferenceImplementation
-```
-
-CI runs the same configuration via `.github/workflows/certora.yml`. To keep prover time
+CI runs the two CI profiles via `.github/workflows/certora.yml`. To keep prover time
 proportional to risk, the job first checks whether anything in the verification cone
 changed (`certora/`, `contracts/libs/crypto/`, or the workflow itself):
 
