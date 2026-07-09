@@ -20,3 +20,6 @@ generated-types
 
 # Rust helper build artifacts
 tools/schnorr-ffi/target
+
+# Certora prover artifacts
+.certora_internal
