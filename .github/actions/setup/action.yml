@@ -18,6 +18,9 @@ runs:
     - name: Install Foundry
       uses: foundry-rs/foundry-toolchain@v1
 
+    - name: Setup Rust
+      uses: dtolnay/rust-toolchain@stable
+
     - name: Install packages
       run: bun install --frozen-lockfile
       shell: bash
