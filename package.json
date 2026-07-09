@@ -32,6 +32,7 @@
   "dependencies": {},
   "devDependencies": {
     "@eslint/js": "^10.0.1",
+    "@noble/curves": "^2.0.1",
     "@nomicfoundation/hardhat-toolbox-mocha-ethers": "^3.0.3",
     "@nomicfoundation/hardhat-typechain": "^3.0.3",
     "@solidstate/hardhat-contract-sizer": "^3.0.0",
