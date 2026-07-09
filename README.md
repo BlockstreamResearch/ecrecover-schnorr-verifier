@@ -1,18 +1,17 @@
-# ecrecover-schnorr-verifier
+# Ecrecover Schnorr Verifier
 
-This repository includes an experimental library for Schnorr signature verification using ec-recover precompile
+An experimental highly-optimized library for Schnorr signature verification using sha256 and ec-recover precompiles.
 
-## Foundry dependencies
+Gas usage: `7541`.
 
-Foundry dependencies under `lib/` are intentionally not committed.
+## Tests
 
-- `bun run forge:deps` installs `forge-std` locally with `forge install --no-git`.
-- `bun run forge:test` bootstraps Foundry dependencies, builds the Rust signer helper, and runs the Forge suite.
+Full BIP340 unit tests + fuzz tests coverage.
 
 ## Formal verification
 
-The `certora/` directory contains a Certora Prover setup: an assembly-free reference
-implementation, CVL rules (input-domain handling, no-revert, determinism, and equivalence
-between the optimized assembly and the reference), and `bun run certora` to launch a run.
-See [certora/README.md](certora/README.md) for the property list and scope notes. CI runs
-the prover via `.github/workflows/certora.yml` when the `CERTORAKEY` secret is configured.
+The verifier implementation is formally verified via Certora against its non-optimized counterpart. See [certora/README.md](certora/README.md) for the property list and scope notes.
+
+## License
+
+This project is licensed under the MIT License.
