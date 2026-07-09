@@ -1,0 +1,137 @@
+name: "certora"
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+      - dev
+      - fuzzy
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
+    env:
+      CERTORAKEY: ${{ secrets.CERTORAKEY }}
+    steps:
+      - name: Checkout the repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Detect Certora-relevant changes
+        id: changes
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            BASE="${{ github.event.pull_request.base.sha }}"
+          else
+            BASE="${{ github.event.before }}"
+          fi
+
+          # Run on first pushes and force pushes where the base commit is unknown.
+          if [ -z "$BASE" ] || [ "$BASE" = "0000000000000000000000000000000000000000" ] || ! git cat-file -e "$BASE" 2>/dev/null; then
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          if git diff --name-only "$BASE" "${{ github.sha }}" | grep -E '^(certora/|contracts/libs/crypto/|\.github/workflows/certora\.yml)'; then
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Point to the previous report
+        if: steps.changes.outputs.changed == 'false'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          {
+            echo "### Certora verification skipped"
+            echo ""
+            echo "No changes to \`certora/\`, \`contracts/libs/crypto/\` or the workflow itself."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          FOUND=""
+          for RUN_ID in $(gh run list --workflow certora.yml --status success --limit 20 --json databaseId --jq '.[].databaseId'); do
+            if gh run download "$RUN_ID" -n certora-report -D previous-report 2>/dev/null; then
+              FOUND="$RUN_ID"
+              break
+            fi
+          done
+
+          if [ -n "$FOUND" ]; then
+            {
+              echo ""
+              echo "Previous report (run [$FOUND](${{ github.server_url }}/${{ github.repository }}/actions/runs/$FOUND)):"
+              echo ""
+              cat previous-report/report-url.txt
+            } >> "$GITHUB_STEP_SUMMARY"
+          else
+            {
+              echo ""
+              echo "No previous report artifact found (never run, or artifact expired)."
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Check Certora key availability
+        id: certora-key
+        if: steps.changes.outputs.changed == 'true'
+        run: |
+          if [ -n "$CERTORAKEY" ]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::CERTORAKEY secret is not configured; skipping formal verification."
+          fi
+
+      - name: Setup Python
+        if: steps.changes.outputs.changed == 'true' && steps.certora-key.outputs.present == 'true'
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Setup Java
+        if: steps.changes.outputs.changed == 'true' && steps.certora-key.outputs.present == 'true'
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Install Certora CLI and solc
+        if: steps.changes.outputs.changed == 'true' && steps.certora-key.outputs.present == 'true'
+        run: |
+          pip install certora-cli solc-select
+          solc-select install 0.8.34
+          solc-select use 0.8.34
+
+      - name: Run Certora prover
+        if: steps.changes.outputs.changed == 'true' && steps.certora-key.outputs.present == 'true'
+        run: |
+          set -o pipefail
+          certoraRun certora/confs/SchnorrVerifier.conf --wait_for_results all 2>&1 | tee -a certora-run.log
+          certoraRun certora/confs/SchnorrVerifier-modular.conf --wait_for_results all 2>&1 | tee -a certora-run.log
+
+      - name: Publish report link
+        if: always() && steps.changes.outputs.changed == 'true' && steps.certora-key.outputs.present == 'true'
+        run: |
+          grep -oE 'https://prover\.certora\.com/output/[^[:space:]]+' certora-run.log | sort -u > report-url.txt || true
+          if [ -s report-url.txt ]; then
+            {
+              echo "### Certora report"
+              echo ""
+              cat report-url.txt
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Upload report artifact
+        if: always() && steps.changes.outputs.changed == 'true' && steps.certora-key.outputs.present == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: certora-report
+          path: report-url.txt
+          if-no-files-found: ignore

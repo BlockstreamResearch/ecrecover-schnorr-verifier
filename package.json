@@ -19,6 +19,7 @@
     "prepare": "husky",
     "compile": "hardhat compile",
     "coverage": "hardhat test --coverage",
+    "certora": "certoraRun certora/confs/SchnorrVerifier.conf",
     "forge:deps": "sh ./scripts/foundry-install-deps.sh",
     "forge:test": "bun run forge:deps && cargo build --release --manifest-path tools/schnorr-ffi/Cargo.toml && forge test",
     "test": "hardhat test",

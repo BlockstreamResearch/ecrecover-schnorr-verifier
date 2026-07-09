@@ -84,7 +84,7 @@ library SchnorrVerifierLib {
         }
 
         // BIP340 challenge and sign-convention conversion:
-        // e  = H(Rx || Px || m) mod n
+        // e  = H_BIP340(Rx || Px || m) mod n
         // e* = n - e (mod n), so [e*]P = -[e]P
         uint256 negatedChallengeScalar_;
         {
