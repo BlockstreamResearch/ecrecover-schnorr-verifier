@@ -16,3 +16,7 @@ implementation, CVL rules (input-domain handling, no-revert, determinism, and eq
 between the optimized assembly and the reference), and `bun run certora` to launch a run.
 See [certora/README.md](certora/README.md) for the property list and scope notes. CI runs
 the prover via `.github/workflows/certora.yml` when the `CERTORAKEY` secret is configured.
+
+## License
+
+This project is licensed under the MIT License — see the [LICENSE](LICENSE) file for details.
