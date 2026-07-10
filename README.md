@@ -1,12 +1,12 @@
 # Ecrecover Schnorr Verifier
 
-An experimental highly-optimized library for Schnorr signature verification using sha256 and ec-recover precompiles.
+An experimental, highly optimized BIP-340-compatible library for Schnorr signature verification using sha256 and ecrecover precompiles.
 
-Gas usage: `7541`.
+Gas usage: `6567`.
 
 ## Tests
 
-Full BIP340 unit tests + fuzz tests coverage.
+Full BIP-340 unit tests + fuzz tests coverage.
 
 ## Formal verification
 
