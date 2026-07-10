@@ -10,6 +10,10 @@ contract SchnorrVerifierFoundryTest is Test {
         0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEFFFFFC2F;
     uint256 internal constant SECP256K1_SCALAR_ORDER =
         0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141;
+    uint256 internal constant SECP256K1_SQRT_EXPONENT =
+        0x3FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFBFFFFF0C;
+
+    address internal constant MODEXP_PRECOMPILE = address(0x05);
 
     bytes32 internal constant VECTOR_3_SECRET_KEY =
         hex"0B432B2677937381AEF05BB02A66ECD012773062CF3FA2549E44F58ED2401710";
@@ -213,6 +217,134 @@ contract SchnorrVerifierFoundryTest is Test {
         );
     }
 
+    function testRustHelperVector3VerifiesWithNonceYWitness() public {
+        VerifierInput memory input_ = _sign(
+            VECTOR_3_MESSAGE_HASH,
+            uint256(VECTOR_3_SECRET_KEY),
+            VECTOR_3_AUX_RAND
+        );
+
+        (bool isNonceXOnCurve_, uint256 liftedEvenY_) = _liftXToEvenY(input_.nonceX);
+
+        assertTrue(isNonceXOnCurve_);
+        assertTrue(_verifyWithNonceY(input_, liftedEvenY_));
+    }
+
+    function testFuzzVerifyWithNonceYAcceptsRustGeneratedSignatures(
+        bytes32 messageHash_,
+        uint256 secretKeyScalar_,
+        bytes32 auxRand_
+    ) public {
+        VerifierInput memory input_ = _signBounded(messageHash_, secretKeyScalar_, auxRand_);
+
+        (bool isNonceXOnCurve_, uint256 liftedEvenY_) = _liftXToEvenY(input_.nonceX);
+
+        assertTrue(isNonceXOnCurve_);
+        assertTrue(_verifyWithNonceY(input_, liftedEvenY_));
+    }
+
+    function testFuzzWitnessPathMatchesModexpPath(
+        uint256 publicKeyX_,
+        uint8 publicKeyYParity_,
+        uint256 signatureScalar_,
+        bytes32 messageHash_,
+        uint256 nonceX_
+    ) public view {
+        // On any input, verifying with the honestly lifted witness must agree with the
+        // self-lifting verifier: identical acceptance on on-curve nonces, identical
+        // rejection when `nonceX` has no even-y lift.
+        (bool isNonceXOnCurve_, uint256 liftedEvenY_) = _liftXToEvenY(
+            nonceX_ % SECP256K1_FIELD_PRIME
+        );
+
+        bool modexpPathResult_ = verifier.verify(
+            publicKeyX_,
+            publicKeyYParity_,
+            signatureScalar_,
+            messageHash_,
+            nonceX_
+        );
+        bool witnessPathResult_ = verifier.verifyWithNonceY(
+            publicKeyX_,
+            publicKeyYParity_,
+            signatureScalar_,
+            messageHash_,
+            nonceX_,
+            isNonceXOnCurve_ ? liftedEvenY_ : 0
+        );
+
+        assertEq(witnessPathResult_, modexpPathResult_);
+    }
+
+    function testFuzzRejectsWrongNonceYWitness(
+        bytes32 messageHash_,
+        uint256 secretKeyScalar_,
+        bytes32 auxRand_,
+        uint256 wrongNonceY_
+    ) public {
+        VerifierInput memory input_ = _signBounded(messageHash_, secretKeyScalar_, auxRand_);
+
+        (bool isNonceXOnCurve_, uint256 liftedEvenY_) = _liftXToEvenY(input_.nonceX);
+        assertTrue(isNonceXOnCurve_);
+
+        // Any witness other than the unique even-y lift must be rejected by the
+        // field-membership, parity, or curve-equation check.
+        vm.assume(wrongNonceY_ != liftedEvenY_);
+
+        assertFalse(_verifyWithNonceY(input_, wrongNonceY_));
+    }
+
+    function testFuzzRejectsOutOfRangeNonceYWitness(
+        bytes32 messageHash_,
+        uint256 secretKeyScalar_,
+        bytes32 auxRand_
+    ) public {
+        VerifierInput memory input_ = _signBounded(messageHash_, secretKeyScalar_, auxRand_);
+
+        (bool isNonceXOnCurve_, uint256 liftedEvenY_) = _liftXToEvenY(input_.nonceX);
+        assertTrue(isNonceXOnCurve_);
+
+        // Odd-y mirror of the correct point (p is odd, so p - y flips parity).
+        assertFalse(_verifyWithNonceY(input_, SECP256K1_FIELD_PRIME - liftedEvenY_));
+
+        // Even values outside the base field.
+        assertFalse(_verifyWithNonceY(input_, SECP256K1_FIELD_PRIME + 1));
+        assertFalse(_verifyWithNonceY(input_, type(uint256).max - 1));
+
+        // Odd values outside the base field.
+        assertFalse(_verifyWithNonceY(input_, SECP256K1_FIELD_PRIME));
+        assertFalse(_verifyWithNonceY(input_, type(uint256).max));
+
+        // On-curve but wrong parity is impossible; nearby even values are off-curve.
+        assertFalse(_verifyWithNonceY(input_, addmod(liftedEvenY_, 2, SECP256K1_FIELD_PRIME)));
+
+        // y = 0 is even and in-field but never on the curve: secp256k1 has odd prime
+        // order, so no order-2 point (equivalently, -7 is not a cube residue mod p).
+        assertFalse(_verifyWithNonceY(input_, 0));
+    }
+
+    function testFuzzVerifyWithNonceYRejectsArbitraryInputWithoutReverting(
+        uint256 publicKeyX_,
+        uint8 publicKeyYParity_,
+        uint256 signatureScalar_,
+        bytes32 messageHash_,
+        uint256 nonceX_,
+        uint256 nonceY_
+    ) public view {
+        // Unstructured input must never verify (a hit here would be a forgery)
+        // and must never revert.
+        assertFalse(
+            verifier.verifyWithNonceY(
+                publicKeyX_,
+                publicKeyYParity_,
+                signatureScalar_,
+                messageHash_,
+                nonceX_,
+                nonceY_
+            )
+        );
+    }
+
     /// @dev Signs with a secret key bounded into `[1, n-1]` and skips runs whose
     /// public key x does not fit the ECDSA `r` slot, mirroring the accept-path fuzz test.
     function _signBounded(
@@ -264,5 +396,62 @@ contract SchnorrVerifierFoundryTest is Test {
                 input_.messageHash,
                 input_.nonceX
             );
+    }
+
+    function _verifyWithNonceY(
+        VerifierInput memory input_,
+        uint256 nonceY_
+    ) internal view returns (bool) {
+        return
+            verifier.verifyWithNonceY(
+                input_.publicKeyX,
+                input_.publicKeyYParity,
+                input_.signatureScalar,
+                input_.messageHash,
+                input_.nonceX,
+                nonceY_
+            );
+    }
+
+    /// @dev Test-side witness generator: even-y lift via the modexp precompile, mirroring
+    /// the assembly-free reference in `certora/harness/SchnorrVerifierHarness.sol`. In
+    /// production the caller computes this y-coordinate off-chain.
+    function _liftXToEvenY(
+        uint256 pointX_
+    ) internal view returns (bool pointIsValid_, uint256 liftedEvenY_) {
+        uint256 curveEquationValue_ = addmod(
+            mulmod(
+                mulmod(pointX_, pointX_, SECP256K1_FIELD_PRIME),
+                pointX_,
+                SECP256K1_FIELD_PRIME
+            ),
+            7,
+            SECP256K1_FIELD_PRIME
+        );
+
+        (bool callSucceeded_, bytes memory output_) = MODEXP_PRECOMPILE.staticcall(
+            abi.encode(
+                uint256(32),
+                uint256(32),
+                uint256(32),
+                curveEquationValue_,
+                SECP256K1_SQRT_EXPONENT,
+                SECP256K1_FIELD_PRIME
+            )
+        );
+        if (!callSucceeded_ || output_.length != 32) {
+            return (false, 0);
+        }
+
+        uint256 candidateY_ = abi.decode(output_, (uint256));
+        if (mulmod(candidateY_, candidateY_, SECP256K1_FIELD_PRIME) != curveEquationValue_) {
+            return (false, 0);
+        }
+
+        if ((candidateY_ & 1) == 1) {
+            candidateY_ = SECP256K1_FIELD_PRIME - candidateY_;
+        }
+
+        return (true, candidateY_);
     }
 }

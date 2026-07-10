@@ -108,6 +108,101 @@ contract SchnorrVerifierHarness {
         return recoveredAddress_ != address(0) && recoveredAddress_ == noncePointAddress_;
     }
 
+    /// @notice The optimized witness-based implementation under verification.
+    function verifyWithNonceYOptimized(
+        uint256 publicKeyX_,
+        uint8 publicKeyYParity_,
+        uint256 signatureScalar_,
+        bytes32 messageHash_,
+        uint256 nonceX_,
+        uint256 nonceY_
+    ) external view returns (bool isVerified_) {
+        return
+            SchnorrVerifierLib.verifyWithNonceY(
+                publicKeyX_,
+                publicKeyYParity_,
+                signatureScalar_,
+                messageHash_,
+                nonceX_,
+                nonceY_
+            );
+    }
+
+    /// @notice Assembly-free reference implementation of the witness-based ecSchnorr* verifier.
+    /// @dev Kept in lockstep with the documented workflow of `SchnorrVerifierLib.verifyWithNonceY`:
+    /// 1. Range-check all inputs.
+    /// 2. Validate the caller-supplied `nonceY` witness: field membership, even parity, and
+    ///    the curve equation `y^2 == x^3 + 7 (mod p)` — pinning it to `lift_x_even(nonceX)`.
+    /// 3. Compute the BIP340 challenge `e` and negate it into `e*`.
+    /// 4. Recover `addr([e*]P + [s]G)` via the `ecrecover` builtin.
+    /// 5. Accept only on a non-zero address match.
+    function verifyWithNonceYReference(
+        uint256 publicKeyX_,
+        uint8 publicKeyYParity_,
+        uint256 signatureScalar_,
+        bytes32 messageHash_,
+        uint256 nonceX_,
+        uint256 nonceY_
+    ) external view returns (bool isVerified_) {
+        if (publicKeyX_ == 0 || publicKeyX_ >= SECP256K1_SCALAR_ORDER) {
+            return false;
+        }
+        if (signatureScalar_ == 0 || signatureScalar_ >= SECP256K1_SCALAR_ORDER) {
+            return false;
+        }
+        if (nonceX_ == 0 || nonceX_ >= SECP256K1_FIELD_PRIME) {
+            return false;
+        }
+        if (publicKeyYParity_ > 1) {
+            return false;
+        }
+
+        if (nonceY_ >= SECP256K1_FIELD_PRIME || nonceY_ % 2 == 1) {
+            return false;
+        }
+        uint256 curveEquationValue_ = addmod(
+            mulmod(
+                mulmod(nonceX_, nonceX_, SECP256K1_FIELD_PRIME),
+                nonceX_,
+                SECP256K1_FIELD_PRIME
+            ),
+            7,
+            SECP256K1_FIELD_PRIME
+        );
+        if (mulmod(nonceY_, nonceY_, SECP256K1_FIELD_PRIME) != curveEquationValue_) {
+            return false;
+        }
+
+        address noncePointAddress_ = _pointAddressReference(nonceX_, nonceY_);
+
+        uint256 negatedChallengeScalar_;
+        {
+            (bool challengeComputationSucceeded_, uint256 challengeScalar_) = _challengeReference(
+                nonceX_,
+                publicKeyX_,
+                messageHash_
+            );
+            if (!challengeComputationSucceeded_) {
+                return false;
+            }
+            negatedChallengeScalar_ = challengeScalar_ == 0
+                ? 0
+                : SECP256K1_SCALAR_ORDER - challengeScalar_;
+        }
+
+        address recoveredAddress_ = _recoverReference(
+            bytes32(
+                SECP256K1_SCALAR_ORDER -
+                    mulmod(publicKeyX_, signatureScalar_, SECP256K1_SCALAR_ORDER)
+            ),
+            27 + uint256(publicKeyYParity_),
+            bytes32(publicKeyX_),
+            bytes32(mulmod(negatedChallengeScalar_, publicKeyX_, SECP256K1_SCALAR_ORDER))
+        );
+
+        return recoveredAddress_ != address(0) && recoveredAddress_ == noncePointAddress_;
+    }
+
     /// @dev Reference point address: `last_20_bytes(keccak256(x || y))`. Wrapped as an
     /// internal function so the modular spec can pair it with `SchnorrVerifierLib._pointAddress`
     /// under a shared deterministic summary.

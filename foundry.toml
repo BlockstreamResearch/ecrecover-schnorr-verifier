@@ -13,3 +13,11 @@ optimizer_runs = 200
 
 [profile.default.fuzz]
 runs = 10000
+
+# Gas-benchmark profiles: same build, different EVM rules.
+# prague = pre-Fusaka mainnet; osaka = post-Fusaka mainnet (EIP-7883 modexp repricing).
+[profile.prague]
+evm_version = "prague"
+
+[profile.osaka]
+evm_version = "osaka"

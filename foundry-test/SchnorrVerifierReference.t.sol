@@ -49,6 +49,34 @@ contract SchnorrVerifierReferenceTest is Test {
         );
     }
 
+    function testFuzzWitnessReferenceMatchesOptimizedOnArbitraryInput(
+        uint256 publicKeyX_,
+        uint8 publicKeyYParity_,
+        uint256 signatureScalar_,
+        bytes32 messageHash_,
+        uint256 nonceX_,
+        uint256 nonceY_
+    ) public view {
+        assertEq(
+            harness.verifyWithNonceYOptimized(
+                publicKeyX_,
+                publicKeyYParity_,
+                signatureScalar_,
+                messageHash_,
+                nonceX_,
+                nonceY_
+            ),
+            harness.verifyWithNonceYReference(
+                publicKeyX_,
+                publicKeyYParity_,
+                signatureScalar_,
+                messageHash_,
+                nonceX_,
+                nonceY_
+            )
+        );
+    }
+
     function testFuzzReferenceAcceptsRustGeneratedSignatures(
         bytes32 messageHash_,
         uint256 secretKeyScalar_,
