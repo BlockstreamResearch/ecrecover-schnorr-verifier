@@ -14,6 +14,13 @@ pragma solidity ^0.8.34;
 /// calldata it can be repurposed to compute `Q = [e*]P + [s]G` and return `addr(Q)`.
 /// The verifier then checks:
 /// `addr([e*]P + [s]G) == addr(lift_x_even(Rx))`.
+///
+/// Two entry points reconstruct `lift_x_even(Rx)` differently:
+/// - `verify` computes the y-coordinate on-chain via a modular square root (modexp precompile).
+/// - `verifyWithNonceY` accepts the y-coordinate as a caller-supplied witness and validates it
+///   with two field multiplications, avoiding the modexp call entirely. Since EIP-7883 repriced
+///   modexp, the witness path saves roughly 4500 gas of execution at the cost of one extra
+///   32-byte argument.
 library SchnorrVerifierLib {
     uint256 internal constant SECP256K1_FIELD_PRIME =
         0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEFFFFFC2F;
@@ -118,6 +125,120 @@ library SchnorrVerifierLib {
         );
 
         // Accept only if recovered point matches lifted nonce point (and recovery succeeded).
+        return recoveredAddress_ != address(0) && recoveredAddress_ == noncePointAddress_;
+    }
+
+    /// @notice Verifies a Schnorr signature like `verify`, but takes the nonce point y-coordinate
+    /// as a caller-supplied witness instead of recomputing it on-chain.
+    /// @dev Accepts the same inputs and enforces the same domains as `verify`, plus:
+    /// - `nonceY` must be a field element, even, and satisfy `nonceY^2 == nonceX^3 + 7 (mod p)`.
+    ///
+    /// Soundness: for any on-curve `nonceX` there is exactly one point with even y, so the three
+    /// witness checks pin `nonceY` to `lift_x_even(nonceX)` — the caller cannot supply any other
+    /// value without failing verification. For an off-curve `nonceX` no witness exists and every
+    /// call returns false, matching `verify`. The witness therefore changes gas, not behavior:
+    /// `verifyWithNonceY(..., lift_x_even(nonceX)) == verify(...)` for all inputs.
+    ///
+    /// The y-coordinate is cheap to compute off-chain (any secp256k1 library) and replaces the
+    /// modexp-precompile square root, whose EIP-7883 price dominates the non-ecrecover gas cost.
+    /// The body deliberately duplicates the `verify` wiring instead of extracting shared private
+    /// helpers: at `optimizer_runs = 200` such helpers are not inlined, and the extra internal
+    /// calls would cost both entry points real gas.
+    /// @param publicKeyX_ x-coordinate of public key point `P`.
+    /// @param publicKeyYParity_ parity bit for public key y-coordinate (`0` even, `1` odd).
+    /// @param signatureScalar_ Schnorr scalar `s`.
+    /// @param messageHash_ 32-byte message digest used by the signer.
+    /// @param nonceX_ x-coordinate `Rx` of the Schnorr nonce point.
+    /// @param nonceY_ witness for the even y-coordinate of `lift_x_even(nonceX)`.
+    /// @return isVerified_ true iff signature validates under this ecSchnorr* verifier.
+    function verifyWithNonceY(
+        uint256 publicKeyX_,
+        uint8 publicKeyYParity_,
+        uint256 signatureScalar_,
+        bytes32 messageHash_,
+        uint256 nonceX_,
+        uint256 nonceY_
+    ) internal view returns (bool isVerified_) {
+        // Public key x is routed through the ECDSA `r` slot, which accepts
+        // only scalars in `[1, n-1]`.
+        if (publicKeyX_ == 0 || publicKeyX_ >= SECP256K1_SCALAR_ORDER) {
+            return false;
+        }
+
+        // Signature scalar must be in Zn*.
+        if (signatureScalar_ == 0 || signatureScalar_ >= SECP256K1_SCALAR_ORDER) {
+            return false;
+        }
+
+        // Nonce x-coordinate must be a field element and non-zero.
+        if (nonceX_ == 0 || nonceX_ >= SECP256K1_FIELD_PRIME) {
+            return false;
+        }
+
+        // Parity bit must encode one of the two y branches.
+        if (publicKeyYParity_ > 1) {
+            return false;
+        }
+
+        // Witness checks pinning `nonceY` to `R = lift_x_even(nonceX)`:
+        // field membership and even parity select the canonical BIP340 branch...
+        if (nonceY_ >= SECP256K1_FIELD_PRIME || (nonceY_ & 1) == 1) {
+            return false;
+        }
+
+        // ...and the curve equation `y^2 == x^3 + 7 (mod p)` binds it to `nonceX`.
+        if (
+            mulmod(nonceY_, nonceY_, SECP256K1_FIELD_PRIME) !=
+            addmod(
+                mulmod(
+                    mulmod(nonceX_, nonceX_, SECP256K1_FIELD_PRIME),
+                    nonceX_,
+                    SECP256K1_FIELD_PRIME
+                ),
+                7,
+                SECP256K1_FIELD_PRIME
+            )
+        ) {
+            return false;
+        }
+
+        address noncePointAddress_ = _pointAddress(nonceX_, nonceY_);
+
+        // BIP340 challenge and sign-convention conversion:
+        // e  = H_BIP340(Rx || Px || m) mod n
+        // e* = n - e (mod n), so [e*]P = -[e]P
+        uint256 negatedChallengeScalar_;
+        {
+            (bool challengeComputationSucceeded_, uint256 challengeScalar_) = _challengeBIP340(
+                nonceX_,
+                publicKeyX_,
+                messageHash_
+            );
+            if (!challengeComputationSucceeded_) {
+                return false;
+            }
+            // For e == 0 this yields n, which the mulmod below reduces to 0 — identical to
+            // negating within Zn — so no zero-branch is needed.
+            negatedChallengeScalar_ = SECP256K1_SCALAR_ORDER - challengeScalar_;
+        }
+
+        // ecrecover argument mapping:
+        // hash = n - (Px * s mod n)
+        // v    = 27 + parity(P)
+        // r    = Px
+        // s    = e* * Px mod n
+        // This recovers Q = [e*]P + [s]G.
+        address recoveredAddress_ = _recoverAddress(
+            bytes32(
+                SECP256K1_SCALAR_ORDER -
+                    mulmod(publicKeyX_, signatureScalar_, SECP256K1_SCALAR_ORDER)
+            ),
+            27 + uint256(publicKeyYParity_),
+            bytes32(publicKeyX_),
+            bytes32(mulmod(negatedChallengeScalar_, publicKeyX_, SECP256K1_SCALAR_ORDER))
+        );
+
+        // Accept only if recovered point matches the witnessed nonce point (and recovery succeeded).
         return recoveredAddress_ != address(0) && recoveredAddress_ == noncePointAddress_;
     }
 

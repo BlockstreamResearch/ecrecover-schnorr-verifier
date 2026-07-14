@@ -34,6 +34,14 @@ methods {
         uint256, uint8, uint256, bytes32, uint256
     ) external returns (bool) envfree;
 
+    function verifyWithNonceYOptimized(
+        uint256, uint8, uint256, bytes32, uint256, uint256
+    ) external returns (bool) envfree;
+
+    function verifyWithNonceYReference(
+        uint256, uint8, uint256, bytes32, uint256, uint256
+    ) external returns (bool) envfree;
+
     function SchnorrVerifierLib._liftXToEvenY(
         uint256 pointX_
     ) internal returns (bool, uint256) => liftSummary(pointX_);
@@ -93,6 +101,8 @@ function liftSummary(uint256 pointX) returns (bool, uint256) {
 
 definition SECP256K1_SCALAR_ORDER() returns uint256 =
     0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141;
+definition SECP256K1_FIELD_PRIME() returns uint256 =
+    0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEFFFFFC2F;
 
 ghost mapping(uint256 => mapping(uint256 => mapping(bytes32 => bool))) challengeOkGhost;
 ghost mapping(uint256 => mapping(uint256 => mapping(bytes32 => uint256))) challengeScalarGhost;
@@ -184,4 +194,103 @@ rule matchesReferenceImplementation(
     );
 
     assert optimizedResult == referenceResult;
+}
+
+/// verifyWithNonceY() must never revert, no matter the input. The witness checks are
+/// pure field arithmetic (`mulmod`/`addmod` cannot revert), so the boolean result stays
+/// the only failure channel.
+rule verifyWithNonceYNeverReverts(
+    uint256 publicKeyX,
+    uint8 publicKeyYParity,
+    uint256 signatureScalar,
+    bytes32 messageHash,
+    uint256 nonceX,
+    uint256 nonceY
+) {
+    verifyWithNonceYOptimized@withrevert(
+        publicKeyX, publicKeyYParity, signatureScalar, messageHash, nonceX, nonceY
+    );
+
+    assert !lastReverted;
+}
+
+/// With the crypto primitives modeled deterministically, identical inputs yield
+/// identical results on the witness path.
+rule verifyWithNonceYIsDeterministic(
+    uint256 publicKeyX,
+    uint8 publicKeyYParity,
+    uint256 signatureScalar,
+    bytes32 messageHash,
+    uint256 nonceX,
+    uint256 nonceY
+) {
+    bool firstResult = verifyWithNonceYOptimized(
+        publicKeyX, publicKeyYParity, signatureScalar, messageHash, nonceX, nonceY
+    );
+    bool secondResult = verifyWithNonceYOptimized(
+        publicKeyX, publicKeyYParity, signatureScalar, messageHash, nonceX, nonceY
+    );
+
+    assert firstResult == secondResult;
+}
+
+/// The orchestration of the optimized witness-based verifier agrees with its
+/// assembly-free reference implementation on every input, for every possible behavior
+/// of the (summarized) crypto primitives. The witness validation itself is concrete
+/// field arithmetic on both sides and stays inside the verified cone.
+rule witnessMatchesReferenceImplementation(
+    uint256 publicKeyX,
+    uint8 publicKeyYParity,
+    uint256 signatureScalar,
+    bytes32 messageHash,
+    uint256 nonceX,
+    uint256 nonceY
+) {
+    bool optimizedResult = verifyWithNonceYOptimized(
+        publicKeyX, publicKeyYParity, signatureScalar, messageHash, nonceX, nonceY
+    );
+    bool referenceResult = verifyWithNonceYReference(
+        publicKeyX, publicKeyYParity, signatureScalar, messageHash, nonceX, nonceY
+    );
+
+    assert optimizedResult == referenceResult;
+}
+
+/// Cross-path equivalence: whenever the (summarized) lift reports `nonceX` on-curve and
+/// its output is a well-formed even-y witness — which the real lift guarantees by
+/// construction — verifying with that witness is indistinguishable from the self-lifting
+/// verifier. This is the formal counterpart of the differential fuzz rule
+/// `testFuzzWitnessPathMatchesModexpPath`.
+rule witnessPathAgreesWithModexpPathOnLiftedWitness(
+    uint256 publicKeyX,
+    uint8 publicKeyYParity,
+    uint256 signatureScalar,
+    bytes32 messageHash,
+    uint256 nonceX
+) {
+    require liftValidGhost[nonceX],
+        "the modexp path only proceeds when the lift succeeds";
+
+    uint256 liftedNonceY = liftYGhost[nonceX];
+
+    // True by construction of `_liftXToEvenY` on both sides: the returned y-coordinate
+    // is a canonical even field element satisfying the curve equation. Without these the
+    // unconstrained ghost admits lift outputs the concrete witness checks reject — a
+    // model artifact, not a reachable behavior.
+    require liftedNonceY < SECP256K1_FIELD_PRIME(),
+        "lift outputs are reduced mod p by construction";
+    require liftedNonceY % 2 == 0,
+        "lift outputs are canonicalized to the even branch by construction";
+    require (liftedNonceY * liftedNonceY) % SECP256K1_FIELD_PRIME()
+        == (nonceX * nonceX * nonceX + 7) % SECP256K1_FIELD_PRIME(),
+        "lift outputs satisfy the curve equation by construction";
+
+    bool modexpPathResult = verifyOptimized(
+        publicKeyX, publicKeyYParity, signatureScalar, messageHash, nonceX
+    );
+    bool witnessPathResult = verifyWithNonceYOptimized(
+        publicKeyX, publicKeyYParity, signatureScalar, messageHash, nonceX, liftedNonceY
+    );
+
+    assert witnessPathResult == modexpPathResult;
 }

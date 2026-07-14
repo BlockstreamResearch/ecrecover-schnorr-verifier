@@ -33,6 +33,28 @@ Status as of certora-cli 8.16.2 (prover reports:
 | `verifyIsDeterministic`                    | identical inputs yield identical results                                     | ✅ proved (modular) |
 | `matchesReferenceImplementation`           | optimized assembly and reference implementation agree on all inputs          | ✅ proved (modular) |
 
+### Rules for `verifyWithNonceY` (added with the witness-based verifier; prover run pending)
+
+The witness-based entry point `verifyWithNonceY` is covered by the same two-spec split.
+These rules have **not yet been executed** against the prover (they were authored without
+a Certora key); each is empirically backed by a 10k-run fuzz counterpart.
+
+| Rule                                        | Spec       | Property                                                                    |
+| ------------------------------------------- | ---------- | --------------------------------------------------------------------------- |
+| `witnessRejectsSharedDomainViolations`      | monolithic | any `verify` domain violation ⇒ `false`, regardless of the witness          |
+| `rejectsNonceYOutsideBaseField`             | monolithic | `nonceY >= p` ⇒ `false`                                                     |
+| `rejectsOddNonceY`                          | monolithic | odd witness (the `-R` mirror) ⇒ `false`                                     |
+| `rejectsOffCurveNonceY`                     | monolithic | `nonceY^2 != nonceX^3 + 7 (mod p)` ⇒ `false`                                |
+| `witnessAcceptImpliesWellFormedInput`       | monolithic | acceptance implies a well-formed input and the unique even-y lift witness   |
+| `verifyWithNonceYNeverReverts`              | modular    | never reverts on any input                                                  |
+| `verifyWithNonceYIsDeterministic`           | modular    | identical inputs yield identical results                                    |
+| `witnessMatchesReferenceImplementation`     | modular    | optimized assembly agrees with `verifyWithNonceYReference` on all inputs    |
+| `witnessPathAgreesWithModexpPathOnLiftedWitness` | modular | with the honestly lifted witness, both entry points agree (fuzz: `testFuzzWitnessPathMatchesModexpPath`) |
+
+The cross-path rule constrains the lift ghost to canonical outputs (`y < p`, even,
+on-curve) — true by construction of `_liftXToEvenY` on both sides, and the same style of
+by-construction axiom as the challenge-reduction `require` documented below.
+
 ## The modular decomposition
 
 The last three rules are **unprovable in their monolithic form** — and not merely because

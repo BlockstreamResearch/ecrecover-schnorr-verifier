@@ -37,6 +37,7 @@ const OFFICIAL_VECTOR_3: Bip340Vector = {
 };
 
 const SECP256K1_SCALAR_ORDER = 0xfffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364141n;
+const SECP256K1_FIELD_PRIME = 0xfffffffffffffffffffffffffffffffffffffffffffffffffffffffefffffc2fn;
 
 const { ethers, networkHelpers } = await hre.network.connect();
 
@@ -84,6 +85,34 @@ function toVerifierInput(
     messageHash: withHexPrefix(vector.messageHash),
     nonceX,
   };
+}
+
+function modPow(base: bigint, exponent: bigint, modulus: bigint): bigint {
+  let result = 1n;
+  let poweredBase = base % modulus;
+  let remainingExponent = exponent;
+
+  while (remainingExponent > 0n) {
+    if (remainingExponent & 1n) {
+      result = (result * poweredBase) % modulus;
+    }
+    poweredBase = (poweredBase * poweredBase) % modulus;
+    remainingExponent >>= 1n;
+  }
+
+  return result;
+}
+
+// Off-chain witness for `verifyWithNonceY`: the even-y lift of an x-coordinate,
+// `y = (x^3 + 7)^((p+1)/4) mod p` canonicalized to the even branch. This is what a real
+// caller computes locally instead of paying for the on-chain modexp square root.
+function liftXToEvenY(pointX: bigint): bigint {
+  const curveEquationValue = (pointX * pointX * pointX + 7n) % SECP256K1_FIELD_PRIME;
+  const candidateY = modPow(curveEquationValue, (SECP256K1_FIELD_PRIME + 1n) / 4n, SECP256K1_FIELD_PRIME);
+
+  expect((candidateY * candidateY) % SECP256K1_FIELD_PRIME).to.equal(curveEquationValue);
+
+  return candidateY % 2n === 0n ? candidateY : SECP256K1_FIELD_PRIME - candidateY;
 }
 
 describe("SchnorrVerifier", () => {
@@ -168,6 +197,114 @@ describe("SchnorrVerifier", () => {
       expect(
         await verifier.verify(hexToBigInt(publicKeyX), 0, signature.signatureScalar, zeroMessageHash, signature.nonceX),
       ).to.equal(true);
+    });
+  });
+
+  describe("verifyWithNonceY", () => {
+    it("accepts official BIP340 test vector #3 with an off-chain-computed witness", async () => {
+      const vector = toVerifierInput(OFFICIAL_VECTOR_3);
+      const nonceY = liftXToEvenY(vector.nonceX);
+
+      expect(
+        await verifier.verifyWithNonceY(
+          vector.publicKeyX,
+          vector.publicKeyYParity,
+          vector.signatureScalar,
+          vector.messageHash,
+          vector.nonceX,
+          nonceY,
+        ),
+      ).to.equal(true);
+    });
+
+    it("accepts official BIP340 test vector #1 with an off-chain-computed witness", async () => {
+      const vector = toVerifierInput(OFFICIAL_VECTOR_1);
+      const nonceY = liftXToEvenY(vector.nonceX);
+
+      expect(
+        await verifier.verifyWithNonceY(
+          vector.publicKeyX,
+          vector.publicKeyYParity,
+          vector.signatureScalar,
+          vector.messageHash,
+          vector.nonceX,
+          nonceY,
+        ),
+      ).to.equal(true);
+    });
+
+    it("agrees with verify on a signature freshly produced by @noble/curves", async () => {
+      const secretKey = hexToBytes(OFFICIAL_VECTOR_3.secretKey!);
+      const messageHash = ethers.ZeroHash;
+      const signature = splitSignature(
+        compactHex(schnorr.sign(ethers.getBytes(messageHash), secretKey, hexToBytes(OFFICIAL_VECTOR_3.auxRand!))),
+      );
+      const publicKeyX = hexToBigInt(compactHex(schnorr.getPublicKey(secretKey)));
+      const nonceY = liftXToEvenY(signature.nonceX);
+
+      expect(await verifier.verify(publicKeyX, 0, signature.signatureScalar, messageHash, signature.nonceX)).to.equal(
+        true,
+      );
+      expect(
+        await verifier.verifyWithNonceY(
+          publicKeyX,
+          0,
+          signature.signatureScalar,
+          messageHash,
+          signature.nonceX,
+          nonceY,
+        ),
+      ).to.equal(true);
+    });
+
+    it("rejects a witness with odd parity even when it lies on the curve", async () => {
+      const vector = toVerifierInput(OFFICIAL_VECTOR_3);
+      const oddNonceY = SECP256K1_FIELD_PRIME - liftXToEvenY(vector.nonceX);
+
+      expect(
+        await verifier.verifyWithNonceY(
+          vector.publicKeyX,
+          vector.publicKeyYParity,
+          vector.signatureScalar,
+          vector.messageHash,
+          vector.nonceX,
+          oddNonceY,
+        ),
+      ).to.equal(false);
+    });
+
+    it("rejects witnesses that are off-curve or outside the base field", async () => {
+      const vector = toVerifierInput(OFFICIAL_VECTOR_3);
+      const nonceY = liftXToEvenY(vector.nonceX);
+
+      for (const invalidNonceY of [0n, nonceY + 2n, SECP256K1_FIELD_PRIME + 1n, (1n << 256n) - 2n]) {
+        expect(
+          await verifier.verifyWithNonceY(
+            vector.publicKeyX,
+            vector.publicKeyYParity,
+            vector.signatureScalar,
+            vector.messageHash,
+            vector.nonceX,
+            invalidNonceY,
+          ),
+        ).to.equal(false);
+      }
+    });
+
+    it("rejects a tampered message even with a correct witness", async () => {
+      const vector = toVerifierInput(OFFICIAL_VECTOR_3);
+      const nonceY = liftXToEvenY(vector.nonceX);
+
+      expect(
+        await verifier.verifyWithNonceY(
+          vector.publicKeyX,
+          vector.publicKeyYParity,
+          vector.signatureScalar,
+          ethers.ZeroHash,
+          vector.nonceX,
+          nonceY,
+        ),
+      ).to.equal(false);
     });
   });
 });

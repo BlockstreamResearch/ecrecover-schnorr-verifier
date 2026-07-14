@@ -17,6 +17,14 @@ methods {
     function verifyReference(
         uint256, uint8, uint256, bytes32, uint256
     ) external returns (bool) envfree;
+
+    function verifyWithNonceYOptimized(
+        uint256, uint8, uint256, bytes32, uint256, uint256
+    ) external returns (bool) envfree;
+
+    function verifyWithNonceYReference(
+        uint256, uint8, uint256, bytes32, uint256, uint256
+    ) external returns (bool) envfree;
 }
 
 definition SECP256K1_FIELD_PRIME() returns uint256 =
@@ -130,6 +138,103 @@ rule verifyIsDeterministic(
     );
 
     assert firstResult == secondResult;
+}
+
+/// The witness-based entry point shares every input domain with `verify`; all four
+/// domain violations must be rejected regardless of the witness value.
+rule witnessRejectsSharedDomainViolations(
+    uint256 publicKeyX,
+    uint8 publicKeyYParity,
+    uint256 signatureScalar,
+    bytes32 messageHash,
+    uint256 nonceX,
+    uint256 nonceY
+) {
+    require (publicKeyX == 0 || publicKeyX >= SECP256K1_SCALAR_ORDER())
+        || (signatureScalar == 0 || signatureScalar >= SECP256K1_SCALAR_ORDER())
+        || (nonceX == 0 || nonceX >= SECP256K1_FIELD_PRIME())
+        || publicKeyYParity > 1;
+
+    assert !verifyWithNonceYOptimized(
+        publicKeyX, publicKeyYParity, signatureScalar, messageHash, nonceX, nonceY
+    );
+}
+
+/// The nonce y-coordinate witness must be rejected outside `[0, p-1]`.
+rule rejectsNonceYOutsideBaseField(
+    uint256 publicKeyX,
+    uint8 publicKeyYParity,
+    uint256 signatureScalar,
+    bytes32 messageHash,
+    uint256 nonceX,
+    uint256 nonceY
+) {
+    require nonceY >= SECP256K1_FIELD_PRIME();
+
+    assert !verifyWithNonceYOptimized(
+        publicKeyX, publicKeyYParity, signatureScalar, messageHash, nonceX, nonceY
+    );
+}
+
+/// The nonce y-coordinate witness must be rejected when odd: BIP340 pins the nonce
+/// point to the even-y branch, and accepting the odd mirror would verify against `-R`.
+rule rejectsOddNonceY(
+    uint256 publicKeyX,
+    uint8 publicKeyYParity,
+    uint256 signatureScalar,
+    bytes32 messageHash,
+    uint256 nonceX,
+    uint256 nonceY
+) {
+    require nonceY % 2 == 1;
+
+    assert !verifyWithNonceYOptimized(
+        publicKeyX, publicKeyYParity, signatureScalar, messageHash, nonceX, nonceY
+    );
+}
+
+/// The nonce y-coordinate witness must satisfy the curve equation
+/// `y^2 == x^3 + 7 (mod p)`; anything else cannot be `lift_x_even(nonceX)`.
+rule rejectsOffCurveNonceY(
+    uint256 publicKeyX,
+    uint8 publicKeyYParity,
+    uint256 signatureScalar,
+    bytes32 messageHash,
+    uint256 nonceX,
+    uint256 nonceY
+) {
+    require (nonceY * nonceY) % SECP256K1_FIELD_PRIME()
+        != (nonceX * nonceX * nonceX + 7) % SECP256K1_FIELD_PRIME();
+
+    assert !verifyWithNonceYOptimized(
+        publicKeyX, publicKeyYParity, signatureScalar, messageHash, nonceX, nonceY
+    );
+}
+
+/// Contrapositive of the witness-path domain rules in one shot: an accepted input is
+/// always well-formed and carries the unique even-y on-curve witness.
+rule witnessAcceptImpliesWellFormedInput(
+    uint256 publicKeyX,
+    uint8 publicKeyYParity,
+    uint256 signatureScalar,
+    bytes32 messageHash,
+    uint256 nonceX,
+    uint256 nonceY
+) {
+    bool isVerified = verifyWithNonceYOptimized(
+        publicKeyX, publicKeyYParity, signatureScalar, messageHash, nonceX, nonceY
+    );
+
+    assert isVerified => (
+        publicKeyX > 0 && publicKeyX < SECP256K1_SCALAR_ORDER() &&
+        signatureScalar > 0 && signatureScalar < SECP256K1_SCALAR_ORDER() &&
+        nonceX > 0 && nonceX < SECP256K1_FIELD_PRIME() &&
+        publicKeyYParity <= 1 &&
+        nonceY < SECP256K1_FIELD_PRIME() &&
+        nonceY % 2 == 0 &&
+        (nonceY * nonceY) % SECP256K1_FIELD_PRIME()
+            == (nonceX * nonceX * nonceX + 7) % SECP256K1_FIELD_PRIME()
+    );
 }
 
 /// Flagship rule: the optimized assembly implementation agrees with the assembly-free
