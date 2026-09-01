@@ -4,7 +4,7 @@ use std::process;
 use secp256k1_zkp::{Keypair, Message, Secp256k1, SecretKey, XOnlyPublicKey};
 
 const WORD_BYTES: usize = 32;
-const ABI_SIGN_RESULT_BYTES: usize = WORD_BYTES * 5;
+const ABI_SIGN_RESULT_BYTES: usize = WORD_BYTES * 4;
 const USAGE: &str = "usage: schnorr-ffi sign <message32-hex> <secret-key32-hex> <aux-rand32-hex>";
 
 fn main() {
@@ -102,9 +102,9 @@ fn sign_payload(
     let mut encoded = [0u8; ABI_SIGN_RESULT_BYTES];
 
     encoded[0..WORD_BYTES].copy_from_slice(&public_key_x.serialize());
-    encoded[WORD_BYTES * 2..WORD_BYTES * 3].copy_from_slice(&signature[WORD_BYTES..]);
-    encoded[WORD_BYTES * 3..WORD_BYTES * 4].copy_from_slice(&message_digest);
-    encoded[WORD_BYTES * 4..WORD_BYTES * 5].copy_from_slice(&signature[..WORD_BYTES]);
+    encoded[WORD_BYTES..WORD_BYTES * 2].copy_from_slice(&signature[WORD_BYTES..]);
+    encoded[WORD_BYTES * 2..WORD_BYTES * 3].copy_from_slice(&message_digest);
+    encoded[WORD_BYTES * 3..WORD_BYTES * 4].copy_from_slice(&signature[..WORD_BYTES]);
 
     Ok(encoded)
 }
@@ -150,17 +150,16 @@ mod tests {
             encode_hex(&encoded[0..WORD_BYTES]).to_uppercase(),
             VECTOR_3_PUBLIC_KEY_X
         );
-        assert_eq!(encoded[WORD_BYTES..WORD_BYTES * 2], [0u8; WORD_BYTES]);
         assert_eq!(
-            encode_hex(&encoded[WORD_BYTES * 2..WORD_BYTES * 3]).to_uppercase(),
+            encode_hex(&encoded[WORD_BYTES..WORD_BYTES * 2]).to_uppercase(),
             &VECTOR_3_SIGNATURE[64..]
         );
         assert_eq!(
-            encode_hex(&encoded[WORD_BYTES * 3..WORD_BYTES * 4]).to_uppercase(),
+            encode_hex(&encoded[WORD_BYTES * 2..WORD_BYTES * 3]).to_uppercase(),
             VECTOR_3_MESSAGE_HASH
         );
         assert_eq!(
-            encode_hex(&encoded[WORD_BYTES * 4..WORD_BYTES * 5]).to_uppercase(),
+            encode_hex(&encoded[WORD_BYTES * 3..WORD_BYTES * 4]).to_uppercase(),
             &VECTOR_3_SIGNATURE[..64]
         );
     }

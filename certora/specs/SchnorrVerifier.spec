@@ -5,17 +5,21 @@
  * keccak256, modexp) as uninterpreted/summarized functions, so these rules verify the
  * Solidity/assembly plumbing of the verifier — input-domain handling, non-reverting
  * behavior, and equivalence with the assembly-free reference implementation — not the
- * cryptographic soundness of the ecSchnorr* construction itself (that argument lives in
- * the accompanying paper).
+ * cryptographic soundness of the ecSchnorr* construction itself (the accompanying paper
+ * supplies a reduction conditional on RPAC and application-level integration requirements).
  */
 
 methods {
     function verifyOptimized(
-        uint256, uint8, uint256, bytes32, uint256
+        uint256, uint256, bytes32, uint256
     ) external returns (bool) envfree;
 
     function verifyReference(
-        uint256, uint8, uint256, bytes32, uint256
+        uint256, uint256, bytes32, uint256
+    ) external returns (bool) envfree;
+
+    function verifyWithNonceYOptimized(
+        uint256, uint256, bytes32, uint256, uint256
     ) external returns (bool) envfree;
 }
 
@@ -24,16 +28,15 @@ definition SECP256K1_FIELD_PRIME() returns uint256 =
 definition SECP256K1_SCALAR_ORDER() returns uint256 =
     0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141;
 
-/// verify() must never revert, no matter the input. Callers rely on the boolean
-/// result being the only failure channel.
+/// verify() must never revert for ABI-decodable typed inputs. Callers rely on the
+/// boolean result being the only verifier-level failure channel.
 rule verifyNeverReverts(
     uint256 publicKeyX,
-    uint8 publicKeyYParity,
     uint256 signatureScalar,
     bytes32 messageHash,
     uint256 nonceX
 ) {
-    verifyOptimized@withrevert(publicKeyX, publicKeyYParity, signatureScalar, messageHash, nonceX);
+    verifyOptimized@withrevert(publicKeyX, signatureScalar, messageHash, nonceX);
 
     assert !lastReverted;
 }
@@ -42,73 +45,105 @@ rule verifyNeverReverts(
 /// rejected outside `[1, n-1]`.
 rule rejectsPublicKeyXOutsideScalarField(
     uint256 publicKeyX,
-    uint8 publicKeyYParity,
     uint256 signatureScalar,
     bytes32 messageHash,
     uint256 nonceX
 ) {
     require publicKeyX == 0 || publicKeyX >= SECP256K1_SCALAR_ORDER();
 
-    assert !verifyOptimized(publicKeyX, publicKeyYParity, signatureScalar, messageHash, nonceX);
+    assert !verifyOptimized(publicKeyX, signatureScalar, messageHash, nonceX);
 }
 
-/// The signature scalar must be rejected outside `[1, n-1]`.
+/// BIP340 permits zero and rejects only signature scalars outside `[0, n-1]`.
 rule rejectsSignatureScalarOutsideScalarField(
     uint256 publicKeyX,
-    uint8 publicKeyYParity,
     uint256 signatureScalar,
     bytes32 messageHash,
     uint256 nonceX
 ) {
-    require signatureScalar == 0 || signatureScalar >= SECP256K1_SCALAR_ORDER();
+    require signatureScalar >= SECP256K1_SCALAR_ORDER();
 
-    assert !verifyOptimized(publicKeyX, publicKeyYParity, signatureScalar, messageHash, nonceX);
+    assert !verifyOptimized(publicKeyX, signatureScalar, messageHash, nonceX);
 }
 
 /// The nonce x-coordinate must be rejected outside `[1, p-1]`.
 rule rejectsNonceXOutsideBaseField(
     uint256 publicKeyX,
-    uint8 publicKeyYParity,
     uint256 signatureScalar,
     bytes32 messageHash,
     uint256 nonceX
 ) {
     require nonceX == 0 || nonceX >= SECP256K1_FIELD_PRIME();
 
-    assert !verifyOptimized(publicKeyX, publicKeyYParity, signatureScalar, messageHash, nonceX);
-}
-
-/// The parity bit must be rejected outside {0, 1}.
-rule rejectsInvalidParity(
-    uint256 publicKeyX,
-    uint8 publicKeyYParity,
-    uint256 signatureScalar,
-    bytes32 messageHash,
-    uint256 nonceX
-) {
-    require publicKeyYParity > 1;
-
-    assert !verifyOptimized(publicKeyX, publicKeyYParity, signatureScalar, messageHash, nonceX);
+    assert !verifyOptimized(publicKeyX, signatureScalar, messageHash, nonceX);
 }
 
 /// Contrapositive of the domain rules in one shot: an accepted input is always
 /// well-formed. Guards against any future refactor reordering or dropping a check.
 rule acceptImpliesWellFormedInput(
     uint256 publicKeyX,
-    uint8 publicKeyYParity,
     uint256 signatureScalar,
     bytes32 messageHash,
     uint256 nonceX
 ) {
-    bool isVerified = verifyOptimized(
-        publicKeyX, publicKeyYParity, signatureScalar, messageHash, nonceX
+    bool isVerified = verifyOptimized(publicKeyX, signatureScalar, messageHash, nonceX);
+
+    assert isVerified => (
+        publicKeyX > 0 && publicKeyX < SECP256K1_SCALAR_ORDER() &&
+        signatureScalar < SECP256K1_SCALAR_ORDER() &&
+        nonceX > 0 && nonceX < SECP256K1_FIELD_PRIME()
+    );
+}
+
+/// A witness outside the base field cannot identify a nonce point.
+rule rejectsNonceYOutsideBaseField(
+    uint256 publicKeyX,
+    uint256 signatureScalar,
+    bytes32 messageHash,
+    uint256 nonceX,
+    uint256 nonceY
+) {
+    require nonceY >= SECP256K1_FIELD_PRIME();
+
+    assert !verifyWithNonceYOptimized(
+        publicKeyX, signatureScalar, messageHash, nonceX, nonceY
+    );
+}
+
+/// The BIP340 nonce witness must select the even y-coordinate.
+rule rejectsOddNonceY(
+    uint256 publicKeyX,
+    uint256 signatureScalar,
+    bytes32 messageHash,
+    uint256 nonceX,
+    uint256 nonceY
+) {
+    require nonceY % 2 == 1;
+
+    assert !verifyWithNonceYOptimized(
+        publicKeyX, signatureScalar, messageHash, nonceX, nonceY
+    );
+}
+
+/// Acceptance through the witness path implies every cheaply expressible domain check.
+/// The curve equation itself is checked concretely by the implementation and differential tests.
+rule witnessAcceptImpliesWellFormedInput(
+    uint256 publicKeyX,
+    uint256 signatureScalar,
+    bytes32 messageHash,
+    uint256 nonceX,
+    uint256 nonceY
+) {
+    bool isVerified = verifyWithNonceYOptimized(
+        publicKeyX, signatureScalar, messageHash, nonceX, nonceY
     );
 
     assert isVerified => (
         publicKeyX > 0 && publicKeyX < SECP256K1_SCALAR_ORDER() &&
-        signatureScalar > 0 && signatureScalar < SECP256K1_SCALAR_ORDER() &&
+        signatureScalar < SECP256K1_SCALAR_ORDER() &&
         nonceX > 0 && nonceX < SECP256K1_FIELD_PRIME() &&
-        publicKeyYParity <= 1
+        nonceY < SECP256K1_FIELD_PRIME() &&
+        nonceY % 2 == 0
     );
 }
 
@@ -117,17 +152,12 @@ rule acceptImpliesWellFormedInput(
 /// would undermine the equivalence rule below.
 rule verifyIsDeterministic(
     uint256 publicKeyX,
-    uint8 publicKeyYParity,
     uint256 signatureScalar,
     bytes32 messageHash,
     uint256 nonceX
 ) {
-    bool firstResult = verifyOptimized(
-        publicKeyX, publicKeyYParity, signatureScalar, messageHash, nonceX
-    );
-    bool secondResult = verifyOptimized(
-        publicKeyX, publicKeyYParity, signatureScalar, messageHash, nonceX
-    );
+    bool firstResult = verifyOptimized(publicKeyX, signatureScalar, messageHash, nonceX);
+    bool secondResult = verifyOptimized(publicKeyX, signatureScalar, messageHash, nonceX);
 
     assert firstResult == secondResult;
 }
@@ -138,17 +168,12 @@ rule verifyIsDeterministic(
 /// memory/scratch-space handling of `SchnorrVerifierLib`.
 rule matchesReferenceImplementation(
     uint256 publicKeyX,
-    uint8 publicKeyYParity,
     uint256 signatureScalar,
     bytes32 messageHash,
     uint256 nonceX
 ) {
-    bool optimizedResult = verifyOptimized(
-        publicKeyX, publicKeyYParity, signatureScalar, messageHash, nonceX
-    );
-    bool referenceResult = verifyReference(
-        publicKeyX, publicKeyYParity, signatureScalar, messageHash, nonceX
-    );
+    bool optimizedResult = verifyOptimized(publicKeyX, signatureScalar, messageHash, nonceX);
+    bool referenceResult = verifyReference(publicKeyX, signatureScalar, messageHash, nonceX);
 
     assert optimizedResult == referenceResult;
 }

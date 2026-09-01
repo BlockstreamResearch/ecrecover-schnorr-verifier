@@ -5,7 +5,7 @@ import { Reverter } from "@test-helpers";
 
 import type { SchnorrVerifier } from "@ethers-v6";
 
-import { schnorr, secp256k1 } from "@noble/curves/secp256k1.js";
+import { schnorr } from "@noble/curves/secp256k1.js";
 
 type Bip340Vector = {
   index: number;
@@ -37,6 +37,18 @@ const OFFICIAL_VECTOR_3: Bip340Vector = {
 };
 
 const SECP256K1_SCALAR_ORDER = 0xfffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364141n;
+const SECP256K1_FIELD_PRIME = 0xfffffffffffffffffffffffffffffffffffffffffffffffffffffffefffffc2fn;
+
+// This odd-key-branch signature was accepted by both verifier paths before parity
+// hardening. It satisfies sG - eP_odd = R, but is outside BIP340 because x-only keys
+// always select the even-y public key point.
+const ODD_PUBLIC_KEY_BRANCH_VECTOR = {
+  publicKeyX: 0xf9308a019258c31049344f85f89d5229b531c845836f99b08601f113bce036f9n,
+  signatureScalar: 0x9f811eebb9ea784653b2b32c92059d4850781ebf42363e02972e9d62cacc95e9n,
+  messageHash: "0x0000000000000000000000000000000000000000000000000000000000000000" as const,
+  nonceX: 0x79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798n,
+  nonceY: 0x483ada7726a3c4655da4fbfc0e1108a8fd17b448a68554199c47d08ffb10d4b8n,
+};
 
 const { ethers, networkHelpers } = await hre.network.connect();
 
@@ -65,12 +77,8 @@ function splitSignature(signature: string): { nonceX: bigint; signatureScalar: b
   };
 }
 
-function toVerifierInput(
-  vector: Bip340Vector,
-  publicKeyYParity = 0,
-): {
+function toVerifierInput(vector: Bip340Vector): {
   publicKeyX: bigint;
-  publicKeyYParity: number;
   signatureScalar: bigint;
   messageHash: `0x${string}`;
   nonceX: bigint;
@@ -79,11 +87,31 @@ function toVerifierInput(
 
   return {
     publicKeyX: hexToBigInt(vector.publicKeyX),
-    publicKeyYParity,
     signatureScalar,
     messageHash: withHexPrefix(vector.messageHash),
     nonceX,
   };
+}
+
+function modPow(base: bigint, exponent: bigint, modulus: bigint): bigint {
+  let result = 1n;
+  let poweredBase = base % modulus;
+
+  while (exponent > 0n) {
+    if (exponent & 1n) result = (result * poweredBase) % modulus;
+    poweredBase = (poweredBase * poweredBase) % modulus;
+    exponent >>= 1n;
+  }
+
+  return result;
+}
+
+function liftXToEvenY(pointX: bigint): bigint {
+  const curveEquationValue = (pointX * pointX * pointX + 7n) % SECP256K1_FIELD_PRIME;
+  const candidateY = modPow(curveEquationValue, (SECP256K1_FIELD_PRIME + 1n) / 4n, SECP256K1_FIELD_PRIME);
+
+  expect((candidateY * candidateY) % SECP256K1_FIELD_PRIME).to.equal(curveEquationValue);
+  return candidateY % 2n === 0n ? candidateY : SECP256K1_FIELD_PRIME - candidateY;
 }
 
 describe("SchnorrVerifier", () => {
@@ -120,12 +148,12 @@ describe("SchnorrVerifier", () => {
       expect(await verifier.verify(...(Object.values(toVerifierInput(OFFICIAL_VECTOR_3)) as any))).to.equal(true);
     });
 
-    it("rejects the official signature when publicKeyYParity is odd", async () => {
-      const vector = toVerifierInput(OFFICIAL_VECTOR_3, 1);
-      const compressedPublicKeyPrefix = secp256k1.getPublicKey(hexToBytes(OFFICIAL_VECTOR_3.secretKey!), true)[0];
+    it("rejects a valid odd-key-branch signature that the previous implementation accepted", async () => {
+      const vector = ODD_PUBLIC_KEY_BRANCH_VECTOR;
 
-      expect(compressedPublicKeyPrefix).to.equal(0x03);
-      expect(await verifier.verify(...(Object.values(vector) as any))).to.equal(false);
+      expect(
+        await verifier.verify(vector.publicKeyX, vector.signatureScalar, vector.messageHash, vector.nonceX),
+      ).to.equal(false);
     });
 
     it("accepts valid BIP340 signatures with publicKeyX in the upper half of [1, n-1]", async () => {
@@ -147,8 +175,21 @@ describe("SchnorrVerifier", () => {
       const vector = toVerifierInput(OFFICIAL_VECTOR_3);
 
       expect(
-        await verifier.verify(SECP256K1_SCALAR_ORDER, 0, vector.signatureScalar, vector.messageHash, vector.nonceX),
+        await verifier.verify(SECP256K1_SCALAR_ORDER, vector.signatureScalar, vector.messageHash, vector.nonceX),
       ).to.equal(false);
+    });
+
+    it("treats s = 0 as in-range and rejects only after cryptographic verification", async () => {
+      const vector = toVerifierInput(OFFICIAL_VECTOR_3);
+      const zeroScalarInput = { ...vector, signatureScalar: 0n };
+      const outOfRangeInput = { ...vector, signatureScalar: SECP256K1_SCALAR_ORDER };
+
+      expect(await verifier.verify(...(Object.values(zeroScalarInput) as any))).to.equal(false);
+      expect(await verifier.verify(...(Object.values(outOfRangeInput) as any))).to.equal(false);
+
+      const zeroScalarGas = await verifier.verify.estimateGas(...(Object.values(zeroScalarInput) as any));
+      const outOfRangeGas = await verifier.verify.estimateGas(...(Object.values(outOfRangeInput) as any));
+      expect(zeroScalarGas).to.be.greaterThan(outOfRangeGas);
     });
 
     it("accepts zero-message signatures, matching BIP340", async () => {
@@ -166,8 +207,56 @@ describe("SchnorrVerifier", () => {
         true,
       );
       expect(
-        await verifier.verify(hexToBigInt(publicKeyX), 0, signature.signatureScalar, zeroMessageHash, signature.nonceX),
+        await verifier.verify(hexToBigInt(publicKeyX), signature.signatureScalar, zeroMessageHash, signature.nonceX),
       ).to.equal(true);
+    });
+  });
+
+  describe("verifyWithNonceY", () => {
+    it("accepts a valid signature with its even nonce witness", async () => {
+      const vector = toVerifierInput(OFFICIAL_VECTOR_3);
+      const nonceY = liftXToEvenY(vector.nonceX);
+
+      expect(await verifier.verifyWithNonceY(...(Object.values({ ...vector, nonceY }) as any))).to.equal(true);
+    });
+
+    it("rejects a valid odd-key-branch signature that the previous implementation accepted", async () => {
+      expect(await verifier.verifyWithNonceY(...(Object.values(ODD_PUBLIC_KEY_BRANCH_VECTOR) as any))).to.equal(false);
+    });
+
+    it("rejects invalid nonce witnesses", async () => {
+      const vector = toVerifierInput(OFFICIAL_VECTOR_3);
+      const nonceY = liftXToEvenY(vector.nonceX);
+      const verify = (candidateY: bigint) =>
+        verifier.verifyWithNonceY(...(Object.values({ ...vector, nonceY: candidateY }) as any));
+
+      expect(await verify(SECP256K1_FIELD_PRIME - nonceY)).to.equal(false);
+      expect(await verify(nonceY + 2n)).to.equal(false);
+      expect(await verify(SECP256K1_FIELD_PRIME)).to.equal(false);
+      expect(await verify(2n ** 256n - 1n)).to.equal(false);
+    });
+
+    it("uses the BIP340 scalar range [0, n-1] on the witness path", async () => {
+      const vector = toVerifierInput(OFFICIAL_VECTOR_3);
+      const nonceY = liftXToEvenY(vector.nonceX);
+      const zeroScalarInput = { ...vector, signatureScalar: 0n, nonceY };
+      const outOfRangeInput = { ...vector, signatureScalar: SECP256K1_SCALAR_ORDER, nonceY };
+
+      expect(await verifier.verifyWithNonceY(...(Object.values(zeroScalarInput) as any))).to.equal(false);
+      expect(await verifier.verifyWithNonceY(...(Object.values(outOfRangeInput) as any))).to.equal(false);
+
+      const zeroScalarGas = await verifier.verifyWithNonceY.estimateGas(...(Object.values(zeroScalarInput) as any));
+      const outOfRangeGas = await verifier.verifyWithNonceY.estimateGas(...(Object.values(outOfRangeInput) as any));
+      expect(zeroScalarGas).to.be.greaterThan(outOfRangeGas);
+    });
+
+    it("uses less gas than recovering the nonce y-coordinate on-chain", async () => {
+      const vector = toVerifierInput(OFFICIAL_VECTOR_3);
+      const nonceY = liftXToEvenY(vector.nonceX);
+      const originalGas = await verifier.verify.estimateGas(...(Object.values(vector) as any));
+      const witnessGas = await verifier.verifyWithNonceY.estimateGas(...(Object.values({ ...vector, nonceY }) as any));
+
+      expect(originalGas - witnessGas).to.be.greaterThanOrEqual(3_900n);
     });
   });
 });
