@@ -2,7 +2,7 @@
 pragma solidity ^0.8.34;
 
 /// @title SchnorrVerifierLib
-/// @notice Verifies BIP340-compatible Schnorr signatures on secp256k1 via the `ecrecover` precompile.
+/// @notice Verifies BIP340-style Schnorr signatures on secp256k1 via the `ecrecover` precompile.
 /// @dev This library implements the ecSchnorr* construction:
 ///
 /// - BIP340 verification equation:
@@ -27,49 +27,30 @@ library SchnorrVerifierLib {
     /// @notice Verifies a Schnorr signature represented as `(nonceX, signatureScalar)` against an x-only key.
     /// @dev Inputs and checks:
     /// - `publicKeyX` is constrained to `[1, n-1]` because it is passed through the ECDSA `r` slot.
-    /// - `publicKeyYParity` must be 0 or 1 and selects `lift_x_parity(publicKeyX)` for the recovered key point.
-    /// - `signatureScalar` must be in `[1, n-1]`.
+    /// - `publicKeyX` identifies BIP340's canonical even-y public key point.
+    /// - `signatureScalar` must be in `[0, n-1]`, matching BIP340's `s < n` check.
     /// - `nonceX` must be in `[1, p-1]` and lie on secp256k1 (validated via modular square root).
     ///
     /// Workflow:
     /// 1. Lift `nonceX` to even-y point and derive `noncePointAddress = addr(lift_x_even(nonceX))`.
     /// 2. Compute BIP340 challenge `e = H_BIP340(nonceX || publicKeyX || messageHash) mod n`.
-    /// 3. Set `e* = n - e mod n`.
+    /// 3. Reject `e = 0`, then set `e* = n - e`.
     /// 4. Call `ecrecover` with encoded values so recovered point is `[e*]P + [s]G`.
     /// 5. Return true iff recovered address equals `noncePointAddress`.
     ///
-    /// If `ecrecover` fails, it yields `address(0)` and verification fails.
+    /// If the challenge is zero, or `ecrecover` fails or returns zero, verification fails.
     /// @param publicKeyX_ x-coordinate of public key point `P`.
-    /// @param publicKeyYParity_ parity bit for public key y-coordinate (`0` even, `1` odd).
     /// @param signatureScalar_ Schnorr scalar `s`.
-    /// @param messageHash_ 32-byte message digest used by the signer.
+    /// @param messageHash_ Exact 32-byte BIP340 message; no hashing or domain separation is performed.
     /// @param nonceX_ x-coordinate `Rx` of the Schnorr nonce point.
     /// @return isVerified_ true iff signature validates under this ecSchnorr* verifier.
     function verify(
         uint256 publicKeyX_,
-        uint8 publicKeyYParity_,
         uint256 signatureScalar_,
         bytes32 messageHash_,
         uint256 nonceX_
     ) internal view returns (bool isVerified_) {
-        // Public key x is routed through the ECDSA `r` slot, which accepts
-        // only scalars in `[1, n-1]`.
-        if (publicKeyX_ == 0 || publicKeyX_ >= SECP256K1_SCALAR_ORDER) {
-            return false;
-        }
-
-        // Signature scalar must be in Zn*.
-        if (signatureScalar_ == 0 || signatureScalar_ >= SECP256K1_SCALAR_ORDER) {
-            return false;
-        }
-
-        // Nonce x-coordinate must be a field element and non-zero.
-        if (nonceX_ == 0 || nonceX_ >= SECP256K1_FIELD_PRIME) {
-            return false;
-        }
-
-        // Parity bit must encode one of the two y branches.
-        if (publicKeyYParity_ > 1) {
+        if (!_commonInputsAreValid(publicKeyX_, signatureScalar_, nonceX_)) {
             return false;
         }
 
@@ -83,27 +64,105 @@ library SchnorrVerifierLib {
             noncePointAddress_ = _pointAddress(nonceX_, liftedEvenY_);
         }
 
-        // BIP340 challenge and sign-convention conversion:
-        // e  = H_BIP340(Rx || Px || m) mod n
-        // e* = n - e (mod n), so [e*]P = -[e]P
-        uint256 negatedChallengeScalar_;
-        {
-            (bool challengeComputationSucceeded_, uint256 challengeScalar_) = _challengeBIP340(
-                nonceX_,
+        return
+            _verifyAgainstNonceAddress(
                 publicKeyX_,
-                messageHash_
+                signatureScalar_,
+                messageHash_,
+                nonceX_,
+                noncePointAddress_
             );
-            if (!challengeComputationSucceeded_) {
-                return false;
-            }
-            negatedChallengeScalar_ = challengeScalar_ == 0
-                ? 0
-                : SECP256K1_SCALAR_ORDER - challengeScalar_;
+    }
+
+    /// @notice Verifies a Schnorr signature without recovering the nonce y-coordinate on-chain.
+    /// @dev Applies the same validation and verification semantics as `verify`, except `nonceY_`
+    /// must be an in-field, even witness satisfying `nonceY_^2 = nonceX_^3 + 7 (mod p)`.
+    /// @param publicKeyX_ x-coordinate of public key point `P`.
+    /// @param signatureScalar_ Schnorr scalar `s`.
+    /// @param messageHash_ Exact 32-byte BIP340 message; no hashing or domain separation is performed.
+    /// @param nonceX_ x-coordinate `Rx` of the Schnorr nonce point.
+    /// @param nonceY_ even y-coordinate witness for the nonce point.
+    /// @return isVerified_ true iff the witness is valid and the signature verifies.
+    function verifyWithNonceY(
+        uint256 publicKeyX_,
+        uint256 signatureScalar_,
+        bytes32 messageHash_,
+        uint256 nonceX_,
+        uint256 nonceY_
+    ) internal view returns (bool isVerified_) {
+        if (!_commonInputsAreValid(publicKeyX_, signatureScalar_, nonceX_)) {
+            return false;
         }
+
+        if (nonceY_ >= SECP256K1_FIELD_PRIME || (nonceY_ & 1) == 1) {
+            return false;
+        }
+
+        uint256 curveEquationValue_ = addmod(
+            mulmod(
+                mulmod(nonceX_, nonceX_, SECP256K1_FIELD_PRIME),
+                nonceX_,
+                SECP256K1_FIELD_PRIME
+            ),
+            7,
+            SECP256K1_FIELD_PRIME
+        );
+        if (mulmod(nonceY_, nonceY_, SECP256K1_FIELD_PRIME) != curveEquationValue_) {
+            return false;
+        }
+
+        address noncePointAddress_ = _pointAddress(nonceX_, nonceY_);
+
+        return
+            _verifyAgainstNonceAddress(
+                publicKeyX_,
+                signatureScalar_,
+                messageHash_,
+                nonceX_,
+                noncePointAddress_
+            );
+    }
+
+    /// @dev Shared domain checks for both public verification paths. The public key is x-only.
+    /// Recovery always selects BIP340's canonical even-y branch.
+    function _commonInputsAreValid(
+        uint256 publicKeyX_,
+        uint256 signatureScalar_,
+        uint256 nonceX_
+    ) private pure returns (bool inputsAreValid_) {
+        return
+            publicKeyX_ != 0 &&
+            publicKeyX_ < SECP256K1_SCALAR_ORDER &&
+            signatureScalar_ < SECP256K1_SCALAR_ORDER &&
+            nonceX_ != 0 &&
+            nonceX_ < SECP256K1_FIELD_PRIME;
+    }
+
+    /// @dev Shared BIP340 challenge, fixed-even-key recovery, and nonce-address comparison.
+    /// The caller must validate common inputs and derive the nonce address from either the
+    /// on-chain lift or a separately validated even-y witness.
+    function _verifyAgainstNonceAddress(
+        uint256 publicKeyX_,
+        uint256 signatureScalar_,
+        bytes32 messageHash_,
+        uint256 nonceX_,
+        address noncePointAddress_
+    ) private view returns (bool isVerified_) {
+        // e  = H_BIP340(Rx || Px || m) mod n
+        // e* = n - e (mod n), so [e*]P = -[e]P.
+        (bool challengeComputationSucceeded_, uint256 challengeScalar_) = _challengeBIP340(
+            nonceX_,
+            publicKeyX_,
+            messageHash_
+        );
+        if (!challengeComputationSucceeded_ || challengeScalar_ == 0) {
+            return false;
+        }
+        uint256 negatedChallengeScalar_ = SECP256K1_SCALAR_ORDER - challengeScalar_;
 
         // ecrecover argument mapping:
         // hash = n - (Px * s mod n)
-        // v    = 27 + parity(P)
+        // v    = 27 (the even-y public key branch enforced above)
         // r    = Px
         // s    = e* * Px mod n
         // This recovers Q = [e*]P + [s]G.
@@ -112,12 +171,11 @@ library SchnorrVerifierLib {
                 SECP256K1_SCALAR_ORDER -
                     mulmod(publicKeyX_, signatureScalar_, SECP256K1_SCALAR_ORDER)
             ),
-            27 + uint256(publicKeyYParity_),
+            27,
             bytes32(publicKeyX_),
             bytes32(mulmod(negatedChallengeScalar_, publicKeyX_, SECP256K1_SCALAR_ORDER))
         );
 
-        // Accept only if recovered point matches lifted nonce point (and recovery succeeded).
         return recoveredAddress_ != address(0) && recoveredAddress_ == noncePointAddress_;
     }
 

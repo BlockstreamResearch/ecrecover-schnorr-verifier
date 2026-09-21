@@ -29,45 +29,27 @@ contract SchnorrVerifierHarness {
     /// @notice The optimized implementation under verification.
     function verifyOptimized(
         uint256 publicKeyX_,
-        uint8 publicKeyYParity_,
         uint256 signatureScalar_,
         bytes32 messageHash_,
         uint256 nonceX_
     ) external view returns (bool isVerified_) {
-        return
-            SchnorrVerifierLib.verify(
-                publicKeyX_,
-                publicKeyYParity_,
-                signatureScalar_,
-                messageHash_,
-                nonceX_
-            );
+        return SchnorrVerifierLib.verify(publicKeyX_, signatureScalar_, messageHash_, nonceX_);
     }
 
     /// @notice Assembly-free reference implementation of the ecSchnorr* verifier.
     /// @dev Kept in lockstep with the documented workflow of `SchnorrVerifierLib.verify`:
-    /// 1. Range-check all inputs.
+    /// 1. Range-check all inputs and enforce the even public-key branch.
     /// 2. Lift `nonceX` to the even-y point and derive its Ethereum address.
-    /// 3. Compute the BIP340 challenge `e` and negate it into `e*`.
+    /// 3. Compute the BIP340 challenge `e`, reject zero, and negate it into `e*`.
     /// 4. Recover `addr([e*]P + [s]G)` via the `ecrecover` builtin.
     /// 5. Accept only on a non-zero address match.
     function verifyReference(
         uint256 publicKeyX_,
-        uint8 publicKeyYParity_,
         uint256 signatureScalar_,
         bytes32 messageHash_,
         uint256 nonceX_
     ) external view returns (bool isVerified_) {
-        if (publicKeyX_ == 0 || publicKeyX_ >= SECP256K1_SCALAR_ORDER) {
-            return false;
-        }
-        if (signatureScalar_ == 0 || signatureScalar_ >= SECP256K1_SCALAR_ORDER) {
-            return false;
-        }
-        if (nonceX_ == 0 || nonceX_ >= SECP256K1_FIELD_PRIME) {
-            return false;
-        }
-        if (publicKeyYParity_ > 1) {
+        if (!_commonInputsAreValidReference(publicKeyX_, signatureScalar_, nonceX_)) {
             return false;
         }
 
@@ -80,27 +62,110 @@ contract SchnorrVerifierHarness {
             noncePointAddress_ = _pointAddressReference(nonceX_, liftedEvenY_);
         }
 
-        uint256 negatedChallengeScalar_;
-        {
-            (bool challengeComputationSucceeded_, uint256 challengeScalar_) = _challengeReference(
-                nonceX_,
+        return
+            _verifyAgainstNonceAddressReference(
                 publicKeyX_,
-                messageHash_
+                signatureScalar_,
+                messageHash_,
+                nonceX_,
+                noncePointAddress_
             );
-            if (!challengeComputationSucceeded_) {
-                return false;
-            }
-            negatedChallengeScalar_ = challengeScalar_ == 0
-                ? 0
-                : SECP256K1_SCALAR_ORDER - challengeScalar_;
+    }
+
+    /// @notice Optimized witness entry point under verification.
+    function verifyWithNonceYOptimized(
+        uint256 publicKeyX_,
+        uint256 signatureScalar_,
+        bytes32 messageHash_,
+        uint256 nonceX_,
+        uint256 nonceY_
+    ) external view returns (bool isVerified_) {
+        return
+            SchnorrVerifierLib.verifyWithNonceY(
+                publicKeyX_,
+                signatureScalar_,
+                messageHash_,
+                nonceX_,
+                nonceY_
+            );
+    }
+
+    /// @notice Assembly-free reference for the witness entry point.
+    function verifyWithNonceYReference(
+        uint256 publicKeyX_,
+        uint256 signatureScalar_,
+        bytes32 messageHash_,
+        uint256 nonceX_,
+        uint256 nonceY_
+    ) external view returns (bool isVerified_) {
+        if (!_commonInputsAreValidReference(publicKeyX_, signatureScalar_, nonceX_)) {
+            return false;
         }
+        if (nonceY_ >= SECP256K1_FIELD_PRIME || nonceY_ % 2 == 1) {
+            return false;
+        }
+
+        uint256 curveEquationValue_ = addmod(
+            mulmod(
+                mulmod(nonceX_, nonceX_, SECP256K1_FIELD_PRIME),
+                nonceX_,
+                SECP256K1_FIELD_PRIME
+            ),
+            7,
+            SECP256K1_FIELD_PRIME
+        );
+        if (mulmod(nonceY_, nonceY_, SECP256K1_FIELD_PRIME) != curveEquationValue_) {
+            return false;
+        }
+
+        address noncePointAddress_ = _pointAddressReference(nonceX_, nonceY_);
+
+        return
+            _verifyAgainstNonceAddressReference(
+                publicKeyX_,
+                signatureScalar_,
+                messageHash_,
+                nonceX_,
+                noncePointAddress_
+            );
+    }
+
+    function _commonInputsAreValidReference(
+        uint256 publicKeyX_,
+        uint256 signatureScalar_,
+        uint256 nonceX_
+    ) internal pure returns (bool inputsAreValid_) {
+        return
+            publicKeyX_ != 0 &&
+            publicKeyX_ < SECP256K1_SCALAR_ORDER &&
+            signatureScalar_ < SECP256K1_SCALAR_ORDER &&
+            nonceX_ != 0 &&
+            nonceX_ < SECP256K1_FIELD_PRIME;
+    }
+
+    function _verifyAgainstNonceAddressReference(
+        uint256 publicKeyX_,
+        uint256 signatureScalar_,
+        bytes32 messageHash_,
+        uint256 nonceX_,
+        address noncePointAddress_
+    ) internal view returns (bool isVerified_) {
+        (bool challengeComputationSucceeded_, uint256 challengeScalar_) = _challengeReference(
+            nonceX_,
+            publicKeyX_,
+            messageHash_
+        );
+        if (!challengeComputationSucceeded_ || challengeScalar_ == 0) {
+            return false;
+        }
+        uint256 negatedChallengeScalar_ = SECP256K1_SCALAR_ORDER - challengeScalar_;
 
         address recoveredAddress_ = _recoverReference(
             bytes32(
                 SECP256K1_SCALAR_ORDER -
                     mulmod(publicKeyX_, signatureScalar_, SECP256K1_SCALAR_ORDER)
             ),
-            27 + uint256(publicKeyYParity_),
+            27,
             bytes32(publicKeyX_),
             bytes32(mulmod(negatedChallengeScalar_, publicKeyX_, SECP256K1_SCALAR_ORDER))
         );
